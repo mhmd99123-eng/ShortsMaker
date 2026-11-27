@@ -445,6 +445,48 @@ final class Ui {
           c.drawLine(9, 5, 16, 12, paint);
           c.drawLine(16, 12, 9, 19, paint);
           break;
+        case "scissors":
+          c.drawCircle(6.5f, 6.5f, 2.8f, paint);
+          c.drawCircle(6.5f, 17.5f, 2.8f, paint);
+          c.drawLine(8.6f, 8.4f, 20, 17, paint);
+          c.drawLine(8.6f, 15.6f, 20, 7, paint);
+          break;
+        case "sliders":
+          c.drawLine(4, 7, 20, 7, paint);
+          c.drawLine(4, 17, 20, 17, paint);
+          paint.setStyle(Paint.Style.FILL);
+          c.drawCircle(9, 7, 2.6f, paint);
+          c.drawCircle(15, 17, 2.6f, paint);
+          break;
+        case "text":
+          c.drawLine(5, 6, 19, 6, paint);
+          c.drawLine(12, 6, 12, 19, paint);
+          c.drawLine(9, 19, 15, 19, paint);
+          break;
+        case "stack":
+          c.drawRoundRect(4, 9, 20, 20, 2.5f, 2.5f, paint);
+          c.drawLine(6, 6, 18, 6, paint);
+          c.drawLine(8, 3, 16, 3, paint);
+          break;
+        case "close":
+          c.drawLine(6, 6, 18, 18, paint);
+          c.drawLine(18, 6, 6, 18, paint);
+          break;
+        case "timer":
+          c.drawCircle(12, 13, 7.5f, paint);
+          c.drawLine(12, 13, 12, 9, paint);
+          c.drawLine(10, 2.5f, 14, 2.5f, paint);
+          break;
+        case "full":
+          c.drawLine(4, 9, 4, 4, paint);
+          c.drawLine(4, 4, 9, 4, paint);
+          c.drawLine(15, 4, 20, 4, paint);
+          c.drawLine(20, 4, 20, 9, paint);
+          c.drawLine(20, 15, 20, 20, paint);
+          c.drawLine(20, 20, 15, 20, paint);
+          c.drawLine(9, 20, 4, 20, paint);
+          c.drawLine(4, 20, 4, 15, paint);
+          break;
         default:
           c.drawCircle(12, 12, 8, paint);
       }
