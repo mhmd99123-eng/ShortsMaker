@@ -33,16 +33,21 @@ final class LayerRenderer {
   // ---------------------------------------------------------------- measuring
 
   private StaticLayout layout(Layer l, int W) {
-    String key = l.text + "|" + l.font + "|" + l.scale + "|" + l.align + "|" + W;
+    String key = l.text + "|" + l.font + "|" + l.scale + "|" + l.align + "|" + l.boxWidth + "|" + W;
     Object[] cached = layouts.get(l.id);
     if (cached != null && key.equals(cached[0])) return (StaticLayout) cached[1];
     tp.setTypeface(Fonts.get(l.font));
     tp.setTextSize(Math.max(4, l.scale * W));
     String text = l.text.isEmpty() ? " " : l.text;
-    int maxW = (int) (W * .92f);
-    float natural = 0;
-    for (String line : text.split("\n")) natural = Math.max(natural, tp.measureText(line));
-    int width = (int) Math.max(1, Math.min(maxW, Math.ceil(natural) + 2));
+    int width;
+    if (l.boxWidth > 0) {
+      width = Math.max(1, Math.round(l.boxWidth * W));
+    } else {
+      int maxW = (int) (W * .92f);
+      float natural = 0;
+      for (String line : text.split("\n")) natural = Math.max(natural, tp.measureText(line));
+      width = (int) Math.max(1, Math.min(maxW, Math.ceil(natural) + 2));
+    }
     Layout.Alignment a =
         l.align == 0 ? Layout.Alignment.ALIGN_CENTER : l.align == 1 ? Layout.Alignment.ALIGN_OPPOSITE : Layout.Alignment.ALIGN_NORMAL;
     StaticLayout sl =
@@ -55,11 +60,15 @@ final class LayerRenderer {
     return sl;
   }
 
-  /** Unrotated size of a layer in pixels for a frame W×H: {w, h}. */
-  float[] size(Layer l, int W, int H) {
+  static float textPadding(Layer l) {
+    return l.scale * (l.bg != 0 ? .35f : .12f);
+  }
+
+  /** Unrotated size of a layer in pixels for a frame of width W: {w, h}. */
+  float[] size(Layer l, int W) {
     if (l.type == Layer.TEXT) {
       StaticLayout sl = layout(l, W);
-      float pad = l.bg != 0 ? l.scale * W * .35f : l.scale * W * .12f;
+      float pad = textPadding(l) * W;
       return new float[] {sl.getWidth() + pad * 2, sl.getHeight() + pad * 2};
     }
     float w = l.scale * W;
@@ -68,7 +77,7 @@ final class LayerRenderer {
 
   /** True if (px, py) in frame pixels lands on the layer (rotation aware). */
   boolean hit(Layer l, int W, int H, float px, float py, float slop) {
-    float[] s = size(l, W, H);
+    float[] s = size(l, W);
     double a = Math.toRadians(-l.rotation);
     float dx = px - l.x * W, dy = py - l.y * H;
     float lx = (float) (dx * Math.cos(a) - dy * Math.sin(a));
@@ -107,7 +116,7 @@ final class LayerRenderer {
     float w = sl.getWidth(), h = sl.getHeight();
     int alpha = Math.round(255 * l.opacity);
     if (l.bg != 0) {
-      float pad = th * .35f;
+      float pad = textPadding(l) * W;
       p.setShader(null);
       p.setStyle(Paint.Style.FILL);
       p.setColor(l.bgColor);

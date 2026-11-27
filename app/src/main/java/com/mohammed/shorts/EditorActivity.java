@@ -1,5 +1,7 @@
 package com.mohammed.shorts;
 
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
 import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.content.Intent;
@@ -26,7 +28,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Editor laid out like a mobile video editor: a big 9:16 preview, an auto-zooming timeline, and a
- * bottom toolbar whose tools open in a sliding panel (the preview shrinks to make room).
+ * bottom toolbar whose tools open in a resizable panel.
  */
 @androidx.annotation.OptIn(markerClass = UnstableApi.class)
 public final class EditorActivity extends Activity {
@@ -34,6 +36,8 @@ public final class EditorActivity extends Activity {
   private static final String[] LENGTH_LABELS = {"15ث", "30ث", "60ث", "90ث", "2د", "3د"};
   private static final String[] TOOL_NAMES = {"قص", "ذكي", "إضافة", "الشكل", "الاسم", "المقاطع"};
   private static final String[] TOOL_ICONS = {"scissors", "magic", "plus", "sliders", "text", "stack"};
+  private static final float PANEL_MINI = .26f, PANEL_MID = .40f, PANEL_MAX = .60f;
+  private static final float TRIM_PANEL_HEIGHT = .30f;
 
   private final Handler main = new Handler(Looper.getMainLooper());
   private final ExecutorService io = Executors.newFixedThreadPool(2);
@@ -49,7 +53,8 @@ public final class EditorActivity extends Activity {
 
   // layout
   private FrameLayout root;
-  private View topBar, infoRow;
+  private View topBar;
+  private LinearLayout timelineRows;
   private FrameLayout previewArea, previewBox;
   private TextureView texture;
   private ImageView playIcon;
@@ -62,8 +67,9 @@ public final class EditorActivity extends Activity {
   private LinearLayout toolbar;
   private final List<LinearLayout> toolButtons = new ArrayList<>();
   private int openTool = -1;
-  private ValueAnimator panelAnim;
-  private boolean fullscreen;
+  private ValueAnimator panelAnim, timelineAnim;
+  private int panelHeight;
+  private boolean fullscreen, panelReducedForPreview;
   private View[] tools = new View[6];
 
   // trim panel
@@ -188,7 +194,13 @@ public final class EditorActivity extends Activity {
     col.addView(bar);
 
     // Preview fills whatever space is left and keeps 9:16.
-    previewArea = new FrameLayout(this);
+    previewArea = new FrameLayout(this) {
+      @Override
+      protected void onMeasure(int widthSpec, int heightSpec) {
+        fitPreview(MeasureSpec.getSize(widthSpec), MeasureSpec.getSize(heightSpec));
+        super.onMeasure(widthSpec, heightSpec);
+      }
+    };
     previewBox = new FrameLayout(this);
     previewBox.setBackground(Ui.shape(Ui.SURFACE, dp(18)));
     previewBox.setClipToOutline(true);
@@ -206,9 +218,11 @@ public final class EditorActivity extends Activity {
     cp.bottomMargin = dp(10);
     previewBox.addView(counter, cp);
     previewArea.addView(previewBox, new FrameLayout.LayoutParams(dp(200), dp(356), Gravity.CENTER));
-    previewArea.addOnLayoutChangeListener((v, l, tp, r, bt, ol, ot, or, ob) -> fitPreview());
     col.addView(previewArea, new LinearLayout.LayoutParams(-1, 0, 1));
     setupPreviewTouch();
+
+    timelineRows = Ui.column(this);
+    col.addView(timelineRows, new LinearLayout.LayoutParams(-1, -2));
 
     // Selection info: length pill + exact range
     LinearLayout info = Ui.row(this);
@@ -221,13 +235,12 @@ public final class EditorActivity extends Activity {
     rangeText.setGravity(Gravity.CENTER_VERTICAL | Gravity.END);
     rangeText.setTextDirection(View.TEXT_DIRECTION_LTR);
     info.addView(rangeText, new LinearLayout.LayoutParams(0, -2, 1));
-    infoRow = info;
-    col.addView(info);
+    timelineRows.addView(info);
 
     timeline = new TimelineView(this);
     overview = new TimelineView.Overview(this, timeline);
-    col.addView(overview, Ui.lp(-1, -2, dp(6)));
-    col.addView(timeline);
+    timelineRows.addView(overview, Ui.lp(-1, -2, dp(6)));
+    timelineRows.addView(timeline);
     timeline.setListener(
         new TimelineView.Listener() {
           public void selectionChanged(long s, long e, boolean finished) {
@@ -262,12 +275,20 @@ public final class EditorActivity extends Activity {
     // Sliding tool panel
     panel = Ui.column(this);
     panel.setBackground(Ui.outlined(Ui.SURFACE, Ui.STROKE, dp(24), dp(1)));
-    LinearLayout head = Ui.row(this);
-    head.setPadding(dp(18), dp(10), dp(10), 0);
+    LinearLayout head = Ui.column(this);
+    View grip = new View(this);
+    grip.setBackground(Ui.shape(Ui.MUTED, dp(2)));
+    LinearLayout.LayoutParams gripLp = Ui.lp(dp(32), dp(4), dp(8));
+    gripLp.gravity = Gravity.CENTER_HORIZONTAL;
+    head.addView(grip, gripLp);
+    LinearLayout titleRow = Ui.row(this);
+    titleRow.setPadding(dp(18), dp(2), dp(10), 0);
     panelTitle = Ui.title(this, "", 16);
-    head.addView(panelTitle, new LinearLayout.LayoutParams(0, -2, 1));
-    head.addView(Ui.iconButton(this, "close", "إغلاق", this::closePanel), new LinearLayout.LayoutParams(dp(36), dp(36)));
+    titleRow.addView(panelTitle, new LinearLayout.LayoutParams(0, -2, 1));
+    titleRow.addView(Ui.iconButton(this, "close", "إغلاق", this::closePanel), new LinearLayout.LayoutParams(dp(36), dp(36)));
+    head.addView(titleRow, new LinearLayout.LayoutParams(-1, -2));
     panel.addView(head);
+    setupPanelDrag(head);
     ScrollView scroll = new ScrollView(this);
     scroll.setVerticalScrollBarEnabled(false);
     panelBody = new FrameLayout(this);
@@ -275,17 +296,9 @@ public final class EditorActivity extends Activity {
     scroll.addView(panelBody);
     panel.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
     LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(-1, 0);
-    pl.setMargins(dp(8), dp(8), dp(8), 0);
+    pl.setMargins(dp(8), 0, dp(8), 0);
+    panel.setVisibility(View.GONE);
     col.addView(panel, pl);
-    // swipe the header down to close
-    head.setOnTouchListener(new View.OnTouchListener() {
-      float y0;
-      public boolean onTouch(View v, MotionEvent e) {
-        if (e.getActionMasked() == MotionEvent.ACTION_DOWN) y0 = e.getRawY();
-        else if (e.getActionMasked() == MotionEvent.ACTION_UP && e.getRawY() - y0 > dp(40)) closePanel();
-        return true;
-      }
-    });
 
     // Bottom toolbar
     toolbar = Ui.row(this);
@@ -322,19 +335,19 @@ public final class EditorActivity extends Activity {
     buildSheet();
     renderQueue();
 
-    for (int i = 0; i < col.getChildCount(); i++) Ui.enter(col.getChildAt(i), i);
+    Ui.enter(topBar, 0);
+    Ui.enter(previewArea, 1);
+    Ui.enter(toolbar, 2);
   }
 
-  private void fitPreview() {
-    int aw = previewArea.getWidth() - dp(24), ah = previewArea.getHeight() - dp(fullscreen ? 0 : 8);
-    if (aw <= 0 || ah <= 0) return;
+  private void fitPreview(int areaWidth, int areaHeight) {
+    int aw = Math.max(0, areaWidth - dp(24));
+    int ah = Math.max(0, areaHeight - dp(fullscreen ? 0 : 8));
     int h = Math.min(ah, aw * 16 / 9), w = h * 9 / 16;
+    // Update the child before measuring it, including every frame of the panel animation.
     FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) previewBox.getLayoutParams();
-    if (lp.width != w || lp.height != h) {
-      lp.width = w;
-      lp.height = h;
-      previewBox.setLayoutParams(lp);
-    }
+    lp.width = w;
+    lp.height = h;
   }
 
   // ---------------------------------------------------------------- panel
@@ -348,6 +361,7 @@ public final class EditorActivity extends Activity {
     }
     boolean wasOpen = openTool >= 0;
     openTool = i;
+    panelReducedForPreview = false;
     panelTitle.setText(i == 1 ? "✨ أفضل اللقطات" : i == 2 ? "إضافة" : i == 4 ? "اسم القناة" : TOOL_NAMES[i]);
     if (i == 2) renderLayersPanel();
     panelBody.removeAllViews();
@@ -357,16 +371,20 @@ public final class EditorActivity extends Activity {
     v.setTranslationY(dp(14));
     v.animate().alpha(1f).translationY(0).setDuration(280).setInterpolator(Ui.EASE).start();
     for (int k = 0; k < toolButtons.size(); k++) styleTool(k, k == i);
-    int target = (int) (getResources().getDisplayMetrics().heightPixels * (i == 0 ? .30f : i == 2 ? .44f : .40f));
-    animatePanel(target, wasOpen ? 220 : 380);
+    panelHeight = panelPixels(i == 0 ? TRIM_PANEL_HEIGHT : i == 1 ? PANEL_MID : PANEL_MINI);
+    animatePanel(panelHeight, wasOpen ? 220 : 380);
+    updateTimelineRows(true);
     hideBubble();
   }
 
   private void closePanel() {
     if (openTool < 0) return;
     openTool = -1;
+    panelReducedForPreview = false;
+    panelHeight = 0;
     for (int k = 0; k < toolButtons.size(); k++) styleTool(k, false);
     animatePanel(0, 320);
+    updateTimelineRows(true);
   }
 
   private void styleTool(int k, boolean on) {
@@ -379,30 +397,184 @@ public final class EditorActivity extends Activity {
     b.setBackground(on ? Ui.gradient(dp(18)) : null);
   }
 
-  private void animatePanel(int target, long ms) {
-    if (panelAnim != null) panelAnim.cancel();
+  private int panelPixels(float fraction) {
+    return Math.round(getResources().getDisplayMetrics().heightPixels * fraction);
+  }
+
+  private void setupPanelDrag(View header) {
+    int slop = ViewConfiguration.get(this).getScaledTouchSlop();
+    header.setOnTouchListener(new View.OnTouchListener() {
+      float downY;
+      int startHeight;
+      boolean dragging;
+      VelocityTracker velocity;
+
+      @Override
+      public boolean onTouch(View v, MotionEvent e) {
+        int action = e.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
+          downY = e.getRawY();
+          dragging = false;
+          startHeight = panel.getHeight();
+          velocity = VelocityTracker.obtain();
+        }
+        if (velocity == null) return false;
+        MotionEvent screenEvent = MotionEvent.obtain(e);
+        screenEvent.offsetLocation(e.getRawX() - e.getX(), e.getRawY() - e.getY());
+        velocity.addMovement(screenEvent);
+        screenEvent.recycle();
+        if (action == MotionEvent.ACTION_MOVE) {
+          float dy = e.getRawY() - downY;
+          if (!dragging && Math.abs(dy) > slop) {
+            dragging = true;
+            cancelPanelAnimation();
+            startHeight = panel.getHeight();
+          }
+          if (dragging) setPanelHeight(Math.round(LayerResize.clamp(startHeight - dy, 0, panelPixels(PANEL_MAX))));
+        } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+          velocity.computeCurrentVelocity(1000);
+          float vy = velocity.getYVelocity();
+          velocity.recycle();
+          velocity = null;
+          if (dragging && openTool >= 0) {
+            if (action == MotionEvent.ACTION_UP) snapPanel(vy);
+            else animatePanel(panelHeight, 220);
+          }
+        }
+        return true;
+      }
+    });
+  }
+
+  private void snapPanel(float velocityY) {
+    int height = panel.getLayoutParams().height;
+    int mini = panelPixels(PANEL_MINI), mid = panelPixels(PANEL_MID), max = panelPixels(PANEL_MAX);
+    float projected = height;
+    if (Math.abs(velocityY) > dp(600)) projected -= velocityY * .15f;
+    if (height < mini || projected < mini) {
+      closePanel();
+      return;
+    }
+    panelHeight = projected < (mini + mid) / 2f ? mini : projected < (mid + max) / 2f ? mid : max;
+    animatePanel(panelHeight, 220);
+  }
+
+  private void cancelPanelAnimation() {
+    if (panelAnim == null) return;
+    panelAnim.removeAllListeners();
+    panelAnim.cancel();
+    panelAnim = null;
+  }
+
+  private void setPanelHeight(int height) {
     LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) panel.getLayoutParams();
-    panelAnim = ValueAnimator.ofInt(lp.height, target);
+    if (lp.height == height) return;
+    lp.height = height;
+    lp.topMargin = Math.min(height, dp(8));
+    panel.setLayoutParams(lp);
+  }
+
+  private void animatePanel(int target, long ms) {
+    cancelPanelAnimation();
+    int start = panel.getLayoutParams().height;
+    if (ms == 0 || start == target) {
+      setPanelHeight(target);
+      panel.setVisibility(target == 0 ? View.GONE : View.VISIBLE);
+      return;
+    }
+    panel.setVisibility(View.VISIBLE);
+    panelAnim = ValueAnimator.ofInt(start, target);
     panelAnim.setDuration(ms);
     panelAnim.setInterpolator(Ui.EASE);
-    panelAnim.addUpdateListener(a -> {
-      lp.height = (int) a.getAnimatedValue();
-      panel.setLayoutParams(lp);
+    panelAnim.addUpdateListener(a -> setPanelHeight((int) a.getAnimatedValue()));
+    panelAnim.addListener(new AnimatorListenerAdapter() {
+      @Override
+      public void onAnimationEnd(Animator animation) {
+        panelAnim = null;
+        if (target == 0) panel.setVisibility(View.GONE);
+      }
     });
     panelAnim.start();
   }
 
+  private void updateTimelineRows(boolean animate) {
+    boolean show = !fullscreen && openTool <= 0;
+    if (timelineAnim != null) {
+      timelineAnim.removeAllListeners();
+      timelineAnim.cancel();
+      timelineAnim = null;
+    } else if (show == (timelineRows.getVisibility() == View.VISIBLE)) return;
+
+    if (!animate) {
+      finishTimelineAnimation(show);
+      return;
+    }
+    boolean visible = timelineRows.getVisibility() == View.VISIBLE;
+    int height = timelineRows.getLayoutParams().height;
+    int start = visible ? (height >= 0 ? height : timelineRows.getHeight()) : 0;
+    float startAlpha = visible ? timelineRows.getAlpha() : 0;
+    int target = 0;
+    if (show) {
+      timelineRows.measure(View.MeasureSpec.makeMeasureSpec(root.getWidth(), View.MeasureSpec.EXACTLY),
+          View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+      target = timelineRows.getMeasuredHeight();
+    }
+    setTimelineRows(start, startAlpha);
+    timelineRows.setVisibility(View.VISIBLE);
+    timelineAnim = ValueAnimator.ofInt(start, target);
+    timelineAnim.setDuration(220);
+    timelineAnim.setInterpolator(Ui.EASE);
+    timelineAnim.addUpdateListener(a -> {
+      float t = a.getAnimatedFraction();
+      setTimelineRows((int) a.getAnimatedValue(), startAlpha + ((show ? 1f : 0f) - startAlpha) * t);
+    });
+    timelineAnim.addListener(new AnimatorListenerAdapter() {
+      @Override
+      public void onAnimationEnd(Animator animation) {
+        timelineAnim = null;
+        finishTimelineAnimation(show);
+      }
+    });
+    timelineAnim.start();
+  }
+
+  private void setTimelineRows(int height, float alpha) {
+    ViewGroup.LayoutParams lp = timelineRows.getLayoutParams();
+    lp.height = height;
+    timelineRows.setLayoutParams(lp);
+    timelineRows.setAlpha(alpha);
+  }
+
+  private void finishTimelineAnimation(boolean show) {
+    timelineRows.setVisibility(show ? View.VISIBLE : View.GONE);
+    setTimelineRows(ViewGroup.LayoutParams.WRAP_CONTENT, show ? 1f : 0f);
+  }
+
+  private void reducePanelForPreview() {
+    if (openTool < 0 || panelReducedForPreview) return;
+    panelReducedForPreview = true;
+    int mini = panelPixels(PANEL_MINI);
+    animatePanel(panelHeight <= mini ? 0 : mini, 220);
+  }
+
+  private void restorePanelAfterPreview() {
+    if (!panelReducedForPreview) return;
+    panelReducedForPreview = false;
+    animatePanel(panelHeight, 220);
+  }
+
   private void toggleFullscreen() {
     fullscreen = !fullscreen;
-    if (fullscreen && openTool >= 0) {
+    if (fullscreen) {
       openTool = -1;
+      panelHeight = 0;
+      panelReducedForPreview = false;
       for (int k = 0; k < toolButtons.size(); k++) styleTool(k, false);
-      LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) panel.getLayoutParams();
-      lp.height = 0;
-      panel.setLayoutParams(lp);
+      animatePanel(0, 0);
     }
     int vis = fullscreen ? View.GONE : View.VISIBLE;
-    for (View v : new View[] {topBar, infoRow, overview, timeline, toolbar}) v.setVisibility(vis);
+    for (View v : new View[] {topBar, toolbar}) v.setVisibility(vis);
+    updateTimelineRows(false);
     hideBubble();
     if (fullscreen) Ui.toast(this, "ضغطتين على الفيديو للرجوع");
   }
@@ -440,213 +612,396 @@ public final class EditorActivity extends Activity {
   private View selectionView;
   private boolean snappedX, snappedY;
 
-  // touch state
-  private int touchMode; // 0 none, 1 layer, 2 name
-  private boolean touchMoved, twoFinger;
-  private float downX, downY, startX, startY, startScale, startRot, startDist, startAngle, startCx, startCy;
+  private static final float FRAME_ASPECT = 16f / 9f;
+  private static final float MIN_LINE_WIDTH = .15f, MAX_TEXT_SCALE = .4f;
+  private static final float MAX_LAYER_WIDTH = 2f, MAX_LAYER_HEIGHT = 2f * FRAME_ASPECT;
 
-  /** Draws the frame around the selected layer, plus centre guides while snapping. */
+  private enum LayerHandle {
+    TOP_LEFT(-1, -1), TOP(0, -1), TOP_RIGHT(1, -1),
+    LEFT(-1, 0), RIGHT(1, 0),
+    BOTTOM_LEFT(-1, 1), BOTTOM(0, 1), BOTTOM_RIGHT(1, 1),
+    ROTATE(0, -1);
+
+    final int sx, sy;
+
+    LayerHandle(int sx, int sy) {
+      this.sx = sx;
+      this.sy = sy;
+    }
+  }
+
+  private static final LayerHandle[] LAYER_HANDLES = LayerHandle.values();
+
+  private LayerResize.Box layerBox(Layer l) {
+    // Measure at the GL preview's rendering resolution so wrapping and the handles agree.
+    float[] size = uiRenderer.size(l, style.outW);
+    return new LayerResize.Box(l.x, l.y * FRAME_ASPECT, size[0] / style.outW, size[1] / style.outW);
+  }
+
+  private float minLayerSize() {
+    return dp(24) / (float) Math.max(1, previewBox.getWidth());
+  }
+
+  private float handleY(LayerHandle handle, float halfHeight) {
+    return handle.sy * halfHeight - (handle == LayerHandle.ROTATE ? dp(24) : 0);
+  }
+
+  /** Draws the selected box and handles in the layer's local axes. */
   private View buildSelectionView() {
     return new View(this) {
       final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+      final DashPathEffect dash = new DashPathEffect(new float[] {dp(6), dp(4)}, 0);
 
       @Override
       protected void onDraw(Canvas c) {
-        int W = getWidth(), H = getHeight();
+        int w = previewBox.getWidth(), h = previewBox.getHeight();
+        if (w == 0 || h == 0) return;
+        c.save();
+        c.translate(previewBox.getLeft(), previewBox.getTop());
         p.setStyle(Paint.Style.STROKE);
         if (snappedX || snappedY) {
           p.setStrokeWidth(dp(1));
           p.setColor(0xccffd84a);
-          if (snappedX) c.drawLine(W / 2f, 0, W / 2f, H, p);
-          if (snappedY) c.drawLine(0, H / 2f, W, H / 2f, p);
+          if (snappedX) c.drawLine(w / 2f, 0, w / 2f, h, p);
+          if (snappedY) c.drawLine(0, h / 2f, w, h / 2f, p);
         }
         Layer l = selected;
-        if (l == null || !layers.contains(l)) return;
-        float[] sz = uiRenderer.size(l, W, H);
-        c.save();
-        c.translate(l.x * W, l.y * H);
-        c.rotate(l.rotation);
-        p.setStrokeWidth(dp(1.6f));
-        p.setColor(Ui.ACCENT2);
-        p.setPathEffect(new DashPathEffect(new float[] {dp(6), dp(4)}, 0));
-        c.drawRoundRect(-sz[0] / 2 - dp(4), -sz[1] / 2 - dp(4), sz[0] / 2 + dp(4), sz[1] / 2 + dp(4), dp(6), dp(6), p);
-        p.setPathEffect(null);
-        p.setStyle(Paint.Style.FILL);
-        p.setColor(0xffffffff);
-        float r = dp(4);
-        for (int sx = -1; sx <= 1; sx += 2)
-          for (int sy = -1; sy <= 1; sy += 2)
-            c.drawCircle(sx * (sz[0] / 2 + dp(4)), sy * (sz[1] / 2 + dp(4)), r, p);
+        if (l != null && layers.contains(l)) {
+          LayerResize.Box box = layerBox(l);
+          float halfW = box.width * w / 2 + dp(4), halfH = box.height * w / 2 + dp(4);
+          c.translate(l.x * w, l.y * h);
+          c.rotate(l.rotation);
+          p.setStrokeWidth(dp(1.6f));
+          p.setColor(Ui.ACCENT2);
+          p.setPathEffect(dash);
+          c.drawRoundRect(-halfW, -halfH, halfW, halfH, dp(6), dp(6), p);
+          p.setPathEffect(null);
+
+          p.setColor(Color.WHITE);
+          c.drawLine(0, -halfH, 0, handleY(LayerHandle.ROTATE, halfH), p);
+          p.setStyle(Paint.Style.FILL);
+          for (LayerHandle handle : LAYER_HANDLES) {
+            float x = handle.sx * halfW, y = handleY(handle, halfH);
+            if (handle == LayerHandle.ROTATE || (handle.sx != 0 && handle.sy != 0)) {
+              c.drawCircle(x, y, dp(4), p);
+            } else {
+              int rx = dp(handle.sx == 0 ? 7 : 3), ry = dp(handle.sy == 0 ? 7 : 3);
+              c.drawRoundRect(x - rx, y - ry, x + rx, y + ry, dp(3), dp(3), p);
+            }
+          }
+        }
         c.restore();
       }
     };
   }
 
-  /**
-   * One finger on a layer moves it, two fingers resize and rotate it. The channel name moves and
-   * resizes the same way. Tap plays/pauses (or deselects), double tap opens text editing or full
-   * screen.
-   */
+  private LayerHandle handleAt(float x, float y) {
+    Layer l = selected;
+    if (l == null || !layers.contains(l)) return null;
+    int w = previewBox.getWidth(), h = previewBox.getHeight();
+    LayerResize.Box box = layerBox(l);
+    float dx = x - l.x * w, dy = y - l.y * h;
+    double a = Math.toRadians(l.rotation);
+    float localX = (float) (dx * Math.cos(a) + dy * Math.sin(a));
+    float localY = (float) (-dx * Math.sin(a) + dy * Math.cos(a));
+    float halfW = box.width * w / 2 + dp(4), halfH = box.height * w / 2 + dp(4);
+    float radius = dp(28) / 2f, nearest = radius * radius;
+    LayerHandle hit = null;
+    for (LayerHandle handle : LAYER_HANDLES) {
+      float hx = localX - handle.sx * halfW, hy = localY - handleY(handle, halfH);
+      float distance = hx * hx + hy * hy;
+      if (distance <= nearest) {
+        hit = handle;
+        nearest = distance;
+      }
+    }
+    return hit;
+  }
+
   private void setupPreviewTouch() {
     selectionView = buildSelectionView();
-    previewBox.addView(selectionView, 1, new FrameLayout.LayoutParams(-1, -1));
-    GestureDetector taps =
-        new GestureDetector(
-            this,
-            new GestureDetector.SimpleOnGestureListener() {
-              public boolean onDown(MotionEvent e) {
-                return true;
-              }
+    // Leave room for handles that extend outside the rounded video frame.
+    previewArea.addView(selectionView, new FrameLayout.LayoutParams(-1, -1));
+    previewBox.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> selectionView.invalidate());
+    previewArea.setOnTouchListener(new PreviewTouch());
+  }
 
-              public boolean onSingleTapConfirmed(MotionEvent e) {
-                if (touchMode == 0) {
-                  if (selected != null) select(null);
-                  else togglePlay();
-                }
-                return true;
-              }
+  private final class PreviewTouch implements View.OnTouchListener {
+    private Layer layer;
+    private LayerHandle handle;
+    private boolean mark, moved, twoFinger, trackTaps;
+    private long backgroundTap = -1;
+    private int pointer, secondPointer;
+    private LayerResize.Box startBox;
+    private float startX, startY, startScale, startRotation, startLineWidth;
+    private float lastX, lastY, dragX, dragY, startDistance, startAngle, rotateX, rotateY;
 
-              public boolean onDoubleTap(MotionEvent e) {
-                Layer hit = layerAt(e.getX(), e.getY());
-                if (hit != null && hit.type == Layer.TEXT) {
-                  select(hit);
-                  if (layerText != null) {
-                    layerText.requestFocus();
-                    layerText.setSelection(layerText.getText().length());
-                    ((android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).showSoftInput(layerText, 0);
-                  }
-                } else toggleFullscreen();
-                return true;
-              }
-            });
-    previewBox.setOnTouchListener(
-        (v, e) -> {
-          taps.onTouchEvent(e);
-          float W = v.getWidth(), H = v.getHeight();
-          switch (e.getActionMasked()) {
-            case MotionEvent.ACTION_DOWN: {
-              v.getParent().requestDisallowInterceptTouchEvent(true);
-              downX = e.getX();
-              downY = e.getY();
-              touchMoved = false;
-              twoFinger = false;
-              Layer hit = layerAt(downX, downY);
-              if (hit != null) {
-                touchMode = 1;
-                if (hit != selected) select(hit);
-                startX = hit.x;
-                startY = hit.y;
-                v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
-              } else if (style.markOn && hitsMark(downX, downY, W, H)) {
-                touchMode = 2;
-                startX = style.markX;
-                startY = style.markY;
-                v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
-              } else touchMode = 0;
-              break;
-            }
-            case MotionEvent.ACTION_POINTER_DOWN: {
-              if (e.getPointerCount() != 2) break;
-              if (touchMode == 0) touchMode = selected != null ? 1 : style.markOn ? 2 : 0;
-              if (touchMode == 0) break;
-              twoFinger = true;
-              float dx = e.getX(1) - e.getX(0), dy = e.getY(1) - e.getY(0);
-              startDist = (float) Math.max(1, Math.hypot(dx, dy));
-              startAngle = (float) Math.toDegrees(Math.atan2(dy, dx));
-              startCx = (e.getX(0) + e.getX(1)) / 2;
-              startCy = (e.getY(0) + e.getY(1)) / 2;
-              if (touchMode == 1 && selected != null) {
-                startScale = selected.scale;
-                startRot = selected.rotation;
-                startX = selected.x;
-                startY = selected.y;
-              } else {
-                startScale = style.markSize;
-                startX = style.markX;
-                startY = style.markY;
-              }
-              break;
-            }
-            case MotionEvent.ACTION_MOVE: {
-              if (Math.hypot(e.getX() - downX, e.getY() - downY) > dp(5)) touchMoved = true;
-              if (touchMode == 0) break;
-              float nx, ny;
-              if (twoFinger && e.getPointerCount() >= 2) {
-                float dx = e.getX(1) - e.getX(0), dy = e.getY(1) - e.getY(0);
-                float k = (float) Math.hypot(dx, dy) / startDist;
-                float ang = (float) Math.toDegrees(Math.atan2(dy, dx)) - startAngle;
-                float cx = (e.getX(0) + e.getX(1)) / 2, cy = (e.getY(0) + e.getY(1)) / 2;
-                nx = startX + (cx - startCx) / W;
-                ny = startY + (cy - startCy) / H;
-                if (touchMode == 1 && selected != null) {
-                  float max = selected.type == Layer.TEXT ? .4f : 2f;
-                  selected.scale = Math.max(.015f, Math.min(max, startScale * k));
-                  float rot = startRot + ang;
-                  rot = ((rot + 540) % 360) - 180;
-                  for (int snap = -180; snap <= 180; snap += 90) if (Math.abs(rot - snap) < 4) rot = snap;
-                  selected.rotation = rot;
-                } else {
-                  style.markSize = Math.max(.02f, Math.min(.11f, startScale * k));
-                  if (sliders.containsKey("markSize")) setSlider("markSize", style.markSize);
-                }
-              } else if (!twoFinger) {
-                nx = startX + (e.getX() - downX) / W;
-                ny = startY + (e.getY() - downY) / H;
-              } else break;
-              boolean sx = Math.abs(nx - .5f) < .02f, sy = Math.abs(ny - .5f) < .015f;
-              if ((sx && !snappedX) || (sy && !snappedY)) v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
-              snappedX = sx;
-              snappedY = sy;
-              if (sx) nx = .5f;
-              if (sy) ny = .5f;
-              if (touchMode == 1 && selected != null) {
-                selected.x = Math.max(0f, Math.min(1f, nx));
-                selected.y = Math.max(0f, Math.min(1f, ny));
-                pushLayers(false);
-              } else if (touchMode == 2) {
-                style.markX = Math.max(.03f, Math.min(.97f, nx));
-                style.markY = Math.max(.02f, Math.min(.98f, ny));
-                refreshPreview();
-              }
-              selectionView.invalidate();
-              break;
-            }
-            case MotionEvent.ACTION_POINTER_UP:
-              // keep the remaining finger from jumping: restart a one-finger drag from here
-              if (e.getPointerCount() == 2 && touchMode != 0) {
-                int keep = e.getActionIndex() == 0 ? 1 : 0;
-                downX = e.getX(keep);
-                downY = e.getY(keep);
-                twoFinger = false;
-                if (touchMode == 1 && selected != null) {
-                  startX = selected.x;
-                  startY = selected.y;
-                } else {
-                  startX = style.markX;
-                  startY = style.markY;
-                }
-              }
-              break;
-            case MotionEvent.ACTION_UP:
-            case MotionEvent.ACTION_CANCEL:
-              snappedX = snappedY = false;
-              selectionView.invalidate();
-              if (touchMode == 1) {
-                pushLayers(true);
-                if (openTool == 2 && editingLayer) renderLayersPanel();
-              } else if (touchMode == 2) style.save(this);
-              if (touchMoved || touchMode != 0) main.postDelayed(() -> touchMode = 0, 350);
-              break;
+    private final GestureDetector taps = new GestureDetector(EditorActivity.this,
+        new GestureDetector.SimpleOnGestureListener() {
+          @Override
+          public boolean onDown(MotionEvent e) {
+            return true;
           }
-          return true;
+
+          @Override
+          public boolean onSingleTapConfirmed(MotionEvent e) {
+            if (e.getDownTime() != backgroundTap) return false;
+            if (selected != null) select(null);
+            else togglePlay();
+            return true;
+          }
+
+          @Override
+          public boolean onDoubleTap(MotionEvent e) {
+            if (layer != null && layer.type == Layer.TEXT) {
+              select(layer);
+              if (layerText != null) {
+                layerText.requestFocus();
+                layerText.setSelection(layerText.getText().length());
+                ((android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE))
+                    .showSoftInput(layerText, 0);
+              }
+            } else toggleFullscreen();
+            return true;
+          }
         });
+
+    @Override
+    public boolean onTouch(View v, MotionEvent e) {
+      int action = e.getActionMasked();
+      if (action == MotionEvent.ACTION_DOWN) return begin(v, e);
+      if (trackTaps) taps.onTouchEvent(e);
+      switch (action) {
+        case MotionEvent.ACTION_POINTER_DOWN:
+          if (e.getPointerCount() == 2) beginPinch(e, 0, 1);
+          break;
+        case MotionEvent.ACTION_MOVE:
+          move(v, e);
+          break;
+        case MotionEvent.ACTION_POINTER_UP:
+          liftPointer(e);
+          break;
+        case MotionEvent.ACTION_UP:
+        case MotionEvent.ACTION_CANCEL:
+          finish();
+          break;
+      }
+      return true;
+    }
+
+    private boolean begin(View v, MotionEvent e) {
+      int w = previewBox.getWidth(), h = previewBox.getHeight();
+      if (w == 0 || h == 0) return false;
+      float x = e.getX() - previewBox.getLeft(), y = e.getY() - previewBox.getTop();
+      handle = handleAt(x, y);
+      if (handle == null && (x < 0 || x > w || y < 0 || y > h)) return false;
+      v.getParent().requestDisallowInterceptTouchEvent(true);
+      pointer = e.getPointerId(0);
+      moved = twoFinger = false;
+      layer = handle != null ? selected : layerAt(x, y);
+      mark = layer == null && style.markOn && hitsMark(x, y, w, h);
+      if (layer != null && layer != selected) select(layer);
+      resetDrag(e.getRawX(), e.getRawY());
+      if (handle == LayerHandle.ROTATE) {
+        rotateX = (x - layer.x * w) / w;
+        rotateY = (y - layer.y * h) / w;
+      }
+      if (layer != null || mark) v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+
+      backgroundTap = layer == null && !mark ? e.getDownTime() : -1;
+      trackTaps = handle == null;
+      if (trackTaps) taps.onTouchEvent(e);
+      else {
+        MotionEvent cancel = MotionEvent.obtain(e);
+        cancel.setAction(MotionEvent.ACTION_CANCEL);
+        taps.onTouchEvent(cancel);
+        cancel.recycle();
+      }
+      return true;
+    }
+
+    private void resetDrag(float x, float y) {
+      lastX = x;
+      lastY = y;
+      dragX = dragY = 0;
+      startBox = layer != null ? layerBox(layer) : null;
+      startX = layer != null ? startBox.x : style.markX;
+      startY = layer != null ? startBox.y : style.markY * FRAME_ASPECT;
+      startScale = layer != null ? layer.scale : style.markSize;
+      startRotation = layer != null ? layer.rotation : 0;
+      startLineWidth = layer != null ? layer.boxWidth : 0;
+    }
+
+    private void beginPinch(MotionEvent e, int a, int b) {
+      if (layer == null && !mark) {
+        layer = selected;
+        mark = layer == null && style.markOn;
+      }
+      if (layer == null && !mark) return;
+      backgroundTap = -1;
+      handle = null;
+      twoFinger = moved = true;
+      pointer = e.getPointerId(a);
+      secondPointer = e.getPointerId(b);
+      float dx = e.getRawX(b) - e.getRawX(a), dy = e.getRawY(b) - e.getRawY(a);
+      startDistance = (float) Math.max(1, Math.hypot(dx, dy));
+      startAngle = (float) Math.toDegrees(Math.atan2(dy, dx));
+      resetDrag((e.getRawX(a) + e.getRawX(b)) / 2, (e.getRawY(a) + e.getRawY(b)) / 2);
+      reducePanelForPreview();
+    }
+
+    private void liftPointer(MotionEvent e) {
+      if (!twoFinger) return;
+      int up = e.getActionIndex(), id = e.getPointerId(up);
+      if (id != pointer && id != secondPointer) return;
+      int keep = up == 0 ? 1 : 0;
+      if (e.getPointerCount() > 2) {
+        beginPinch(e, keep, up == 2 ? 1 : 2);
+        return;
+      }
+      twoFinger = false;
+      pointer = e.getPointerId(keep);
+      resetDrag(e.getRawX(keep), e.getRawY(keep));
+    }
+
+    private void move(View v, MotionEvent e) {
+      if (layer == null && !mark) return;
+      int w = previewBox.getWidth(), a = e.findPointerIndex(pointer);
+      if (w == 0 || a < 0) return;
+      float x = e.getRawX(a), y = e.getRawY(a);
+      float factor = 1, angle = 0;
+      if (twoFinger) {
+        int b = e.findPointerIndex(secondPointer);
+        if (b < 0) return;
+        float dx = e.getRawX(b) - x, dy = e.getRawY(b) - y;
+        x += dx / 2;
+        y += dy / 2;
+        factor = (float) Math.hypot(dx, dy) / startDistance;
+        angle = (float) Math.toDegrees(Math.atan2(dy, dx)) - startAngle;
+      }
+      if (!moved) {
+        if (Math.hypot(x - lastX, y - lastY) <= dp(5)) return;
+        moved = true;
+        reducePanelForPreview();
+      }
+      // Track motion on the screen so a changing preview size or origin cannot move the layer.
+      dragX += (x - lastX) / w;
+      dragY += (y - lastY) / w;
+      lastX = x;
+      lastY = y;
+
+      if (handle != null) {
+        dragHandle();
+        pushLayers(false);
+        return;
+      }
+      if (twoFinger) scalePinch(factor, angle);
+      moveBody(v);
+    }
+
+    private void dragHandle() {
+      if (handle == LayerHandle.ROTATE) {
+        float angle = (float) Math.toDegrees(Math.atan2(rotateY + dragY, rotateX + dragX));
+        layer.rotation = LayerResize.snapRotation(angle + 90, 45);
+        return;
+      }
+      int sx = handle.sx, sy = handle.sy;
+      float min = minLayerSize();
+      LayerResize.Box box;
+      if (layer.type == Layer.TEXT) {
+        float previousWidth = layer.boxWidth, previousScale = layer.scale;
+        box = LayerResize.drag(startBox, startRotation, sx, sy, dragX, dragY, sy != 0,
+            0, 0, Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY);
+        if (sy == 0) {
+          box = LayerResize.limitCentre(startBox, box, FRAME_ASPECT);
+          float pad = 2 * LayerRenderer.textPadding(layer);
+          float minWidth = Math.max(MIN_LINE_WIDTH, min - pad);
+          layer.boxWidth = Math.abs(box.width - startBox.width) < .0001f ? startLineWidth
+              : LayerResize.clamp(box.width - pad, minWidth, 1f);
+        } else {
+          setTextScale(layer, startScale * box.height / startBox.height, min);
+        }
+        LayerResize.Box measured = layerBox(layer);
+        box = LayerResize.anchor(startBox, startRotation, sx, sy, measured.width, measured.height);
+        // Reflow can change the size discontinuously, so keep the last valid text box at an edge.
+        if (box.x < 0f || box.x > 1f || box.y < 0f || box.y > FRAME_ASPECT) {
+          layer.boxWidth = previousWidth;
+          layer.scale = previousScale;
+          return;
+        }
+      } else {
+        box = LayerResize.drag(startBox, startRotation, sx, sy, dragX, dragY, layer.lockAspect,
+            min, min, Math.max(MAX_LAYER_WIDTH, startBox.width), Math.max(MAX_LAYER_HEIGHT, startBox.height));
+        box = LayerResize.limitCentre(startBox, box, FRAME_ASPECT);
+        layer.scale = box.width;
+        if (!layer.lockAspect && (sx == 0 || sy == 0)) layer.aspect = box.height / box.width;
+      }
+      layer.x = box.x;
+      layer.y = box.y / FRAME_ASPECT;
+    }
+
+    private void scalePinch(float factor, float angle) {
+      if (layer == null) {
+        style.markSize = LayerResize.clamp(startScale * factor, .02f, .11f);
+        setSlider("markSize", style.markSize);
+      } else {
+        float min = minLayerSize();
+        if (layer.type == Layer.TEXT) setTextScale(layer, startScale * factor, min);
+        else layer.scale = LayerResize.clamp(startScale * factor, Math.max(min, min / layer.aspect),
+            Math.max(MAX_LAYER_WIDTH, startScale));
+        layer.rotation = LayerResize.snapRotation(startRotation + angle, 90);
+      }
+    }
+
+    private void moveBody(View v) {
+      float nx = startX + dragX, ny = (startY + dragY) / FRAME_ASPECT;
+      boolean sx = Math.abs(nx - .5f) < .02f, sy = Math.abs(ny - .5f) < .015f;
+      if ((sx && !snappedX) || (sy && !snappedY)) v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+      snappedX = sx;
+      snappedY = sy;
+      if (sx) nx = .5f;
+      if (sy) ny = .5f;
+      if (layer != null) {
+        layer.x = LayerResize.clamp(nx, 0, 1);
+        layer.y = LayerResize.clamp(ny, 0, 1);
+        pushLayers(false);
+      } else {
+        style.markX = LayerResize.clamp(nx, .03f, .97f);
+        style.markY = LayerResize.clamp(ny, .02f, .98f);
+        selectionView.invalidate();
+        refreshPreview();
+      }
+    }
+
+    private void finish() {
+      snappedX = snappedY = false;
+      selectionView.invalidate();
+      restorePanelAfterPreview();
+      if (moved && layer != null) {
+        pushLayers(true);
+        if (openTool == 2 && editingLayer) renderLayersPanel();
+      } else if (moved && mark) style.save(EditorActivity.this);
+    }
+  }
+
+  private void setTextScale(Layer l, float scale, float minSize) {
+    l.scale = LayerResize.clamp(scale, .015f, MAX_TEXT_SCALE);
+    LayerResize.Box box = layerBox(l);
+    float shortEdge = Math.min(box.width, box.height);
+    if (shortEdge < minSize) {
+      l.scale = Math.min(MAX_TEXT_SCALE, l.scale * minSize / shortEdge);
+    }
   }
 
   private Layer layerAt(float x, float y) {
-    int W = previewBox.getWidth(), H = previewBox.getHeight();
-    if (selected != null && uiRenderer.hit(selected, W, H, x, y, dp(14))) return selected;
-    for (int i = layers.size() - 1; i >= 0; i--)
-      if (uiRenderer.hit(layers.get(i), W, H, x, y, dp(10))) return layers.get(i);
+    int w = previewBox.getWidth(), h = previewBox.getHeight();
+    float px = x * style.outW / w, py = y * style.outH / h;
+    float slop = style.outW / (float) w;
+    if (selected != null && uiRenderer.hit(selected, style.outW, style.outH, px, py, dp(14) * slop)) return selected;
+    for (int i = layers.size() - 1; i >= 0; i--) {
+      Layer l = layers.get(i);
+      if (uiRenderer.hit(l, style.outW, style.outH, px, py, dp(10) * slop)) return l;
+    }
     return null;
   }
 
@@ -1084,8 +1439,7 @@ public final class EditorActivity extends Activity {
 
   /** A paused player shows no new frames; re-seek so the change is visible right away. */
   private void refreshPreview() {
-    main.removeCallbacks(refresh);
-    main.postDelayed(refresh, 60);
+    if (!main.hasCallbacks(refresh)) main.postDelayed(refresh, 60);
   }
 
   // ---------------------------------------------------------------- name tool
@@ -1370,6 +1724,49 @@ public final class EditorActivity extends Activity {
     return Ui.slider(this, label, min, max, value, fmt, (v, user) -> { s.set(v); pushLayers(user); });
   }
 
+  private static String sizePercent(float value) {
+    return Math.round(value * 100) + "٪";
+  }
+
+  private void buildSizeSliders(LinearLayout c, Layer l) {
+    TextView lock = Ui.chip(this, l.lockAspect ? "🔒 تثبيت النسبة" : "🔓 تثبيت النسبة", null);
+    Ui.select(lock, l.lockAspect);
+    lock.setOnClickListener(v -> {
+      l.lockAspect = !l.lockAspect;
+      lock.setText(l.lockAspect ? "🔒 تثبيت النسبة" : "🔓 تثبيت النسبة");
+      Ui.select(lock, l.lockAspect);
+      pushLayers(true);
+    });
+    c.addView(lock, Ui.lp(-2, -2, dp(8)));
+
+    float maxWidth = Math.max(MAX_LAYER_WIDTH, l.scale);
+    float maxHeight = Math.max(MAX_LAYER_HEIGHT, l.scale * l.aspect);
+    String[] labels = l.type == Layer.WAVE ? new String[] {"العرض", "الارتفاع"}
+        : new String[] {"العرض", "الارتفاع", "الحجم"};
+    LinearLayout[] dimensions = new LinearLayout[labels.length];
+    for (int i = 0; i < labels.length; i++) {
+      boolean width = i != 1, uniform = i == 2;
+      dimensions[i] = Ui.slider(this, labels[i], 0, width ? maxWidth : maxHeight,
+          width ? l.scale : l.scale * l.aspect,
+          EditorActivity::sizePercent, (value, user) -> {
+            if (!user) return;
+            boolean keepAspect = l.lockAspect || uniform;
+            float min = minLayerSize(), height = l.scale * l.aspect;
+            LayerResize.Box box = new LayerResize.Box(0, 0, l.scale, height);
+            LayerResize.Box resized = LayerResize.drag(box, 0, width ? 1 : 0, width ? 0 : 1,
+                width ? value - l.scale : 0, width ? 0 : value - height,
+                keepAspect, min, min, maxWidth, maxHeight);
+            l.scale = resized.width;
+            if (!keepAspect) l.aspect = resized.height / resized.width;
+            Ui.setSlider(dimensions[0], 0, maxWidth, l.scale);
+            Ui.setSlider(dimensions[1], 0, maxHeight, l.scale * l.aspect);
+            if (dimensions.length > 2) Ui.setSlider(dimensions[2], 0, maxWidth, l.scale);
+            pushLayers(true);
+          });
+      c.addView(dimensions[i]);
+    }
+  }
+
   private LinearLayout chipRow(String[] labels, int current, java.util.function.IntConsumer pick) {
     LinearLayout row = Ui.row(this);
     List<TextView> chips = new ArrayList<>();
@@ -1444,7 +1841,7 @@ public final class EditorActivity extends Activity {
     if (l.type == Layer.TEXT) buildTextEditor(c, l);
     else if (l.type == Layer.WAVE) buildWaveEditor(c, l);
     else {
-      c.addView(layerSlider("الحجم", .08f, 1.2f, l.scale, v -> Math.round(v * 100) + "٪", v -> l.scale = v));
+      buildSizeSliders(c, l);
       c.addView(layerSlider("انحناء الزوايا", 0, .5f, l.radius, v -> Math.round(v / .5f * 100) + "٪", v -> l.radius = v));
       if (l.type == Layer.VIDEO)
         c.addView(Ui.text(this, "يتكرر طول الشورت. صوت الفيديو المضاف ما ينضاف.", 12, Ui.MUTED), Ui.lp(-1, -2, dp(6)));
@@ -1457,7 +1854,8 @@ public final class EditorActivity extends Activity {
     pl.setMarginStart(dp(8));
     pos.addView(Ui.ghost(this, "صفّر الدوران", null, () -> { l.rotation = 0; pushLayers(true); renderLayersPanel(); }), pl);
     c.addView(pos, Ui.lp(-1, -2, dp(10)));
-    c.addView(Ui.text(this, "👆 اسحبها فوق المعاينة، وبإصبعين كبّر وصغّر ولف.", 12, Ui.MUTED), Ui.lp(-1, -2, dp(10)));
+    c.addView(Ui.text(this, "اسحب مقابض الإطار لتغيير الحجم أو الدوران. حركة الإصبعين تشتغل بعد.", 12, Ui.MUTED),
+        Ui.lp(-1, -2, dp(10)));
     return c;
   }
 
@@ -1526,7 +1924,13 @@ public final class EditorActivity extends Activity {
 
     c.addView(label("لون النص"));
     c.addView(colorRow(l.color, col -> { l.color = col; pushLayers(true); }));
-    c.addView(layerSlider("الحجم", .02f, .25f, l.scale, v -> Math.round(v * 1000) / 10f + "", v -> l.scale = v));
+    c.addView(layerSlider("الحجم", .015f, MAX_TEXT_SCALE, l.scale, EditorActivity::sizePercent,
+        v -> setTextScale(l, v, minLayerSize())));
+    // The first slider step represents automatic width, stored as zero.
+    float auto = MIN_LINE_WIDTH - .001f;
+    c.addView(layerSlider("عرض السطر", auto, 1f, l.boxWidth == 0 ? auto : l.boxWidth,
+        v -> v <= auto ? "تلقائي" : sizePercent(Math.max(MIN_LINE_WIDTH, v)),
+        v -> l.boxWidth = v <= auto ? 0 : Math.max(MIN_LINE_WIDTH, v)));
     c.addView(label("المحاذاة"));
     c.addView(chipRow(new String[] {"وسط", "يمين", "يسار"}, l.align, k -> { l.align = k; pushLayers(true); }));
     c.addView(layerSlider("الحدود", 0, .25f, l.stroke, v -> Math.round(v / .25f * 100) + "٪", v -> l.stroke = v));
@@ -1544,16 +1948,17 @@ public final class EditorActivity extends Activity {
     c.addView(label("الشكل"));
     c.addView(chipRow(new String[] {"أعمدة", "متناظرة", "موجة", "دائرية", "نقاط", "طيف"}, l.waveStyle, k -> {
       l.waveStyle = k;
-      if (k == 3 && l.aspect < .8f) l.aspect = 1f;
+      boolean resized = k == 3 && l.aspect < .8f;
+      if (resized) l.aspect = 1f;
       pushLayers(true);
+      if (resized) renderLayersPanel();
     }));
     c.addView(label("اللون"));
     c.addView(chipRow(new String[] {"تدرّج", "لون واحد"}, l.gradient ? 0 : 1, k -> { l.gradient = k == 0; pushLayers(true); }));
     c.addView(colorRow(l.color, col -> { l.color = col; l.gradient = false; pushLayers(true); renderLayersPanel(); }), Ui.lp(-1, -2, dp(8)));
     c.addView(layerSlider("عدد الأعمدة", 8, 64, l.bars, v -> String.valueOf(Math.round(v)), v -> l.bars = Math.round(v)));
     c.addView(layerSlider("الحساسية", .3f, 2.5f, l.sensitivity, v -> Math.round(v * 100) + "٪", v -> l.sensitivity = v));
-    c.addView(layerSlider("العرض", .2f, 1.2f, l.scale, v -> Math.round(v * 100) + "٪", v -> l.scale = v));
-    c.addView(layerSlider("الارتفاع", .08f, 1.2f, l.aspect, v -> Math.round(v * 100) + "٪", v -> l.aspect = v));
+    buildSizeSliders(c, l);
     if (audio == null || !audio.hasAudio)
       c.addView(Ui.text(this, audio == null ? "جارٍ قراءة صوت الفيديو…" : "الفيديو ما فيه صوت، فالموجة بتكون ساكنة.", 12, Ui.MUTED), Ui.lp(-1, -2, dp(6)));
   }
@@ -1613,8 +2018,7 @@ public final class EditorActivity extends Activity {
           try (java.io.FileOutputStream o = new java.io.FileOutputStream(f)) {
             b.compress(Bitmap.CompressFormat.PNG, 100, o);
           }
-          Layer l = new Layer();
-          l.type = Layer.IMAGE;
+          Layer l = new Layer(Layer.IMAGE);
           l.path = f.getAbsolutePath();
           l.aspect = b.getHeight() / (float) b.getWidth();
           l.scale = l.aspect > 1.2f ? .42f : .6f;
@@ -1698,8 +2102,7 @@ public final class EditorActivity extends Activity {
           main.post(() -> { if (videoProgress != null) videoProgress.setText("جارٍ تجهيز الفيديو… " + pct + "٪"); });
         }
         if (written == 0) throw new Exception();
-        Layer l = new Layer();
-        l.type = Layer.VIDEO;
+        Layer l = new Layer(Layer.VIDEO);
         l.path = dir.getAbsolutePath();
         l.frames = written;
         l.fps = fps;
@@ -2258,6 +2661,11 @@ public final class EditorActivity extends Activity {
   protected void onDestroy() {
     cancelAnalysis = true;
     thumbsGen.incrementAndGet();
+    cancelPanelAnimation();
+    if (timelineAnim != null) {
+      timelineAnim.removeAllListeners();
+      timelineAnim.cancel();
+    }
     main.removeCallbacksAndMessages(null);
     if (player != null) player.release();
     player = null;

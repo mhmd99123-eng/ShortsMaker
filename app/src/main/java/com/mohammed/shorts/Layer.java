@@ -19,7 +19,7 @@ final class Layer {
   static final int TEXT = 0, IMAGE = 1, VIDEO = 2, WAVE = 3;
 
   String id = UUID.randomUUID().toString();
-  int type;
+  final int type;
   /** Centre, 0…1 from the top-left of the frame. */
   float x = .5f, y = .5f;
   /** TEXT: text height ÷ frame width. Others: box width ÷ frame width. */
@@ -29,6 +29,7 @@ final class Layer {
 
   // text
   String text = "";
+  float boxWidth = 0f; // line width ÷ frame width, or 0 for automatic
   String font = Fonts.DEFAULT;
   int color = 0xffffffff;
   int align = 0; // 0 centre, 1 right, 2 left
@@ -41,6 +42,7 @@ final class Layer {
   // image / video
   String path = "";
   float aspect = 1f; // height ÷ width
+  boolean lockAspect;
   float radius = 0f; // ÷ box width
   int frames = 0;
   float fps = 24f;
@@ -51,9 +53,13 @@ final class Layer {
   boolean gradient = true;
   float sensitivity = 1f;
 
+  Layer(int type) {
+    this.type = type;
+    lockAspect = type == IMAGE || type == VIDEO;
+  }
+
   static Layer text(String s) {
-    Layer l = new Layer();
-    l.type = TEXT;
+    Layer l = new Layer(TEXT);
     l.text = s;
     l.scale = .07f;
     l.stroke = .08f;
@@ -69,8 +75,7 @@ final class Layer {
   }
 
   static Layer wave() {
-    Layer l = new Layer();
-    l.type = WAVE;
+    Layer l = new Layer(WAVE);
     l.scale = .78f;
     l.aspect = .28f;
     l.y = .8f;
@@ -107,16 +112,15 @@ final class Layer {
     JSONObject o = new JSONObject();
     o.put("id", id).put("type", type).put("x", x).put("y", y).put("scale", scale).put("rotation", rotation).put("opacity", opacity);
     o.put("text", text).put("font", font).put("color", color).put("align", align).put("stroke", stroke).put("strokeColor", strokeColor);
-    o.put("bg", bg).put("bgColor", bgColor).put("shadow", shadow);
-    o.put("path", path).put("aspect", aspect).put("radius", radius).put("frames", frames).put("fps", fps);
+    o.put("bg", bg).put("bgColor", bgColor).put("shadow", shadow).put("boxWidth", boxWidth);
+    o.put("path", path).put("aspect", aspect).put("lockAspect", lockAspect).put("radius", radius).put("frames", frames).put("fps", fps);
     o.put("waveStyle", waveStyle).put("bars", bars).put("gradient", gradient).put("sensitivity", sensitivity);
     return o;
   }
 
   static Layer fromJson(JSONObject o) {
-    Layer l = new Layer();
+    Layer l = new Layer(o.optInt("type", TEXT));
     l.id = o.optString("id", l.id);
-    l.type = o.optInt("type", TEXT);
     l.x = (float) o.optDouble("x", l.x);
     l.y = (float) o.optDouble("y", l.y);
     l.scale = (float) o.optDouble("scale", l.scale);
@@ -131,8 +135,10 @@ final class Layer {
     l.bg = o.optInt("bg", 0);
     l.bgColor = o.optInt("bgColor", l.bgColor);
     l.shadow = o.optBoolean("shadow", true);
+    l.boxWidth = (float) o.optDouble("boxWidth", 0);
     l.path = o.optString("path", "");
     l.aspect = (float) o.optDouble("aspect", 1);
+    l.lockAspect = o.optBoolean("lockAspect", l.lockAspect);
     l.radius = (float) o.optDouble("radius", 0);
     l.frames = o.optInt("frames", 0);
     l.fps = (float) o.optDouble("fps", 24);
