@@ -29,6 +29,13 @@ final class ShortStyle {
   volatile float shadow = .55f;
   volatile int bgMode = BG_BLUR;
   volatile int bgColor = 0xff101018;
+  /** Channel name drawn on top of everything. Position is the centre, 0…1 from the top-left. */
+  volatile boolean markOn = true;
+  volatile String markText = "Mohammed";
+  /** Text height as a fraction of the frame width. */
+  volatile float markSize = .042f;
+  volatile float markX = .2f, markY = .075f;
+  volatile float markOpacity = .9f;
 
   ShortStyle copy() {
     ShortStyle s = new ShortStyle();
@@ -44,6 +51,12 @@ final class ShortStyle {
     s.shadow = shadow;
     s.bgMode = bgMode;
     s.bgColor = bgColor;
+    s.markOn = markOn;
+    s.markText = markText;
+    s.markSize = markSize;
+    s.markX = markX;
+    s.markY = markY;
+    s.markOpacity = markOpacity;
     return s;
   }
 
@@ -78,6 +91,12 @@ final class ShortStyle {
     s.shadow = p.getFloat("shadow", s.shadow);
     s.bgMode = p.getInt("bgMode", s.bgMode);
     s.bgColor = p.getInt("bgColor", s.bgColor);
+    s.markOn = p.getBoolean("markOn", s.markOn);
+    s.markText = p.getString("markText", s.markText);
+    s.markSize = p.getFloat("markSize", s.markSize);
+    s.markX = p.getFloat("markX", s.markX);
+    s.markY = p.getFloat("markY", s.markY);
+    s.markOpacity = p.getFloat("markOpacity", s.markOpacity);
     return s;
   }
 
@@ -94,7 +113,31 @@ final class ShortStyle {
         .putFloat("shadow", shadow)
         .putInt("bgMode", bgMode)
         .putInt("bgColor", bgColor)
+        .putBoolean("markOn", markOn)
+        .putString("markText", markText)
+        .putFloat("markSize", markSize)
+        .putFloat("markX", markX)
+        .putFloat("markY", markY)
+        .putFloat("markOpacity", markOpacity)
         .apply();
+  }
+
+  /** The channel name rendered as an image; its pixel size is the name's size on the frame. */
+  static android.graphics.Bitmap markBitmap(String text, float heightPx) {
+    android.graphics.Paint p = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+    p.setTypeface(android.graphics.Typeface.create("sans-serif-black", android.graphics.Typeface.NORMAL));
+    p.setTextSize(Math.max(8, heightPx));
+    p.setColor(0xffffffff);
+    p.setShadowLayer(Math.max(2, heightPx * .12f), 0, heightPx * .04f, 0x99000000);
+    String t = text == null || text.trim().isEmpty() ? " " : text.trim();
+    android.graphics.Paint.FontMetrics fm = p.getFontMetrics();
+    int pad = (int) Math.ceil(heightPx * .3f);
+    int w = (int) Math.ceil(p.measureText(t)) + pad * 2;
+    int h = (int) Math.ceil(fm.descent - fm.ascent) + pad * 2;
+    android.graphics.Bitmap b =
+        android.graphics.Bitmap.createBitmap(Math.max(2, w), Math.max(2, h), android.graphics.Bitmap.Config.ARGB_8888);
+    new android.graphics.Canvas(b).drawText(t, pad, pad - fm.ascent, p);
+    return b;
   }
 
   /**

@@ -81,6 +81,9 @@ final class ShortFrameEffect implements GlEffect {
           + "uniform vec4 uOut;\n" // outW, outH, radius px, shadow 0..1
           + "uniform vec4 uLook;\n" // dim, saturation, solid colour mix, unused
           + "uniform vec4 uColor;\n"
+          + "uniform sampler2D uMark;\n"
+          + "uniform vec4 uMarkRect;\n" // x, y, w, h in output pixels
+          + "uniform vec4 uMarkInfo;\n" // opacity, visible, unused, unused
           + "varying vec2 vUv;\n"
           + "float box(vec2 p, vec2 b, float r){\n"
           + "  vec2 q = abs(p) - b + r;\n"
@@ -104,7 +107,13 @@ final class ShortFrameEffect implements GlEffect {
           + "      + texture2D(uTex, local + vec2(o.x, -o.y)).rgb\n"
           + "      + texture2D(uTex, local + vec2(-o.x, -o.y)).rgb) * 0.25;\n"
           + "  float a = 1.0 - smoothstep(-0.75, 0.75, d);\n"
-          + "  gl_FragColor = vec4(mix(bg, fg, a), 1.0);\n"
+          + "  vec3 col = mix(bg, fg, a);\n"
+          + "  vec2 mu = (px - uMarkRect.xy) / uMarkRect.zw;\n"
+          + "  if (uMarkInfo.y > 0.5 && mu.x >= 0.0 && mu.x <= 1.0 && mu.y >= 0.0 && mu.y <= 1.0) {\n"
+          + "    vec4 m = texture2D(uMark, vec2(mu.x, 1.0 - mu.y)) * uMarkInfo.x;\n"
+          + "    col = col * (1.0 - m.a) + m.rgb;\n"
+          + "  }\n"
+          + "  gl_FragColor = vec4(col, 1.0);\n"
           + "}\n";
 
   private static final class Program extends BaseGlShaderProgram {
@@ -114,6 +123,8 @@ final class ShortFrameEffect implements GlEffect {
     private int inW, inH, outW, outH;
     private int smallW, smallH;
     private int texA = -1, texB = -1, fboA = -1, fboB = -1;
+    private int markTex = -1, markW = 2, markH = 2;
+    private String markKey = null;
 
     Program(ShortStyle style, boolean useHdr) throws VideoFrameProcessingException {
       super(/* useHighPrecisionColorComponents= */ useHdr, /* texturePoolCapacity= */ 1);
@@ -207,6 +218,21 @@ final class ShortFrameEffect implements GlEffect {
           draw(blur);
         }
 
+        // Re-render the name only when its text or size changes.
+        String text = style.markText;
+        int markPx = Math.round(style.markSize * outW);
+        String key = text + "|" + markPx;
+        if (markTex == -1 || !key.equals(markKey)) {
+          if (markTex != -1) GlUtil.deleteTexture(markTex);
+          android.graphics.Bitmap mb = ShortStyle.markBitmap(text, markPx);
+          markW = mb.getWidth();
+          markH = mb.getHeight();
+          markTex = GlUtil.createTexture(mb);
+          mb.recycle();
+          markKey = key;
+        }
+        float mcx = style.markX * outW, mcy = (1f - style.markY) * outH;
+
         GlUtil.focusFramebufferUsingCurrentContext(target[0], outW, outH);
         float[] rect =
             ShortStyle.foregroundRect(
@@ -228,6 +254,17 @@ final class ShortFrameEffect implements GlEffect {
             new float[] {
               ((color >> 16) & 255) / 255f, ((color >> 8) & 255) / 255f, (color & 255) / 255f, 1f
             });
+        compose.setSamplerTexIdUniform("uMark", markTex, 2);
+        compose.setFloatsUniform(
+            "uMarkRect", new float[] {mcx - markW / 2f, mcy - markH / 2f, markW, markH});
+        compose.setFloatsUniform(
+            "uMarkInfo",
+            new float[] {
+              style.markOpacity,
+              style.markOn && text != null && !text.trim().isEmpty() ? 1f : 0f,
+              0f,
+              0f
+            });
         draw(compose);
       } catch (GlUtil.GlException e) {
         throw new VideoFrameProcessingException(e, presentationTimeUs);
@@ -239,6 +276,7 @@ final class ShortFrameEffect implements GlEffect {
       super.release();
       try {
         releaseSmall();
+        if (markTex != -1) GlUtil.deleteTexture(markTex);
         down.delete();
         blur.delete();
         compose.delete();

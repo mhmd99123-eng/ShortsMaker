@@ -175,7 +175,7 @@ public final class EditorActivity extends Activity {
     FrameLayout.LayoutParams tlp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
     tlp.bottomMargin = Ui.dp(this, 8);
     previewBox.addView(timeLabel, tlp);
-    previewBox.setOnClickListener(v -> togglePlay());
+    setupPreviewTouch();
     LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(pw, ph);
     plp.gravity = Gravity.CENTER_HORIZONTAL;
     plp.topMargin = Ui.dp(this, 4);
@@ -465,6 +465,9 @@ public final class EditorActivity extends Activity {
 
   private View buildLook() {
     LinearLayout c = Ui.column(this);
+    c.addView(buildMarkCard());
+    View gap = new View(this);
+    c.addView(gap, new LinearLayout.LayoutParams(1, Ui.dp(this, 14)));
     c.addView(Ui.text(this, "قوالب سريعة", 13, Ui.MUTED));
     HorizontalScrollView hs = new HorizontalScrollView(this);
     hs.setHorizontalScrollBarEnabled(false);
@@ -610,6 +613,144 @@ public final class EditorActivity extends Activity {
   private void refreshPreview() {
     main.removeCallbacks(refresh);
     main.postDelayed(refresh, 60);
+  }
+
+
+  // ---------------------------------------------------------------- channel name
+
+  private final List<TextView> markChips = new ArrayList<>();
+  private LinearLayout markControls;
+
+  private View buildMarkCard() {
+    LinearLayout card = Ui.card(this);
+    LinearLayout head = Ui.row(this);
+    head.addView(Ui.text(this, "اسم القناة", 14, Ui.TEXT), new LinearLayout.LayoutParams(0, -2, 1));
+    String[] labels = {"إظهار", "إخفاء"};
+    for (int i = 0; i < 2; i++) {
+      boolean on = i == 0;
+      TextView chip = Ui.chip(this, labels[i], () -> { style.markOn = on; syncMark(); afterLook(true); });
+      markChips.add(chip);
+      LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+      lp.setMarginStart(Ui.dp(this, 8));
+      head.addView(chip, lp);
+    }
+    card.addView(head);
+    markControls = Ui.column(this);
+    EditText text = new EditText(this);
+    text.setSingleLine(true);
+    text.setText(style.markText);
+    text.setHint("اكتب الاسم");
+    text.setTextColor(Ui.TEXT);
+    text.setHintTextColor(Ui.MUTED);
+    text.setTextSize(15);
+    text.setPadding(Ui.dp(this, 14), 0, Ui.dp(this, 14), 0);
+    text.setBackground(Ui.outlined(Ui.SURFACE, Ui.STROKE, Ui.dp(this, 14), Ui.dp(this, 1)));
+    text.addTextChangedListener(new android.text.TextWatcher() {
+      public void beforeTextChanged(CharSequence a, int b, int c2, int d) {}
+      public void onTextChanged(CharSequence a, int b, int c2, int d) {}
+      public void afterTextChanged(android.text.Editable e) { style.markText = e.toString(); afterLook(true); }
+    });
+    markControls.addView(text, Ui.lp(-1, Ui.dp(this, 46), Ui.dp(this, 10)));
+    markControls.addView(slider("markSize", "حجم الاسم", .02f, .11f, style.markSize, v -> Math.round(v / .042f * 100) + "٪", v -> style.markSize = v));
+    markControls.addView(slider("markOpacity", "الوضوح", .2f, 1f, style.markOpacity, v -> pct(v), v -> style.markOpacity = v));
+    HorizontalScrollView hs = new HorizontalScrollView(this);
+    hs.setHorizontalScrollBarEnabled(false);
+    LinearLayout spots = Ui.row(this);
+    String[] names = {"فوق يسار", "فوق الوسط", "فوق يمين", "تحت الوسط"};
+    float[][] pos = {{.2f, .075f}, {.5f, .075f}, {.8f, .075f}, {.5f, .93f}};
+    for (int i = 0; i < names.length; i++) {
+      float[] p = pos[i];
+      TextView chip = Ui.chip(this, names[i], () -> { style.markX = p[0]; style.markY = p[1]; afterLook(true); });
+      LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+      lp.setMarginEnd(Ui.dp(this, 8));
+      spots.addView(chip, lp);
+    }
+    hs.addView(spots);
+    markControls.addView(hs, Ui.lp(-1, -2, Ui.dp(this, 6)));
+    markControls.addView(Ui.text(this, "👆 اسحب الاسم بإصبعك فوق المعاينة، وكبّره أو صغّره بإصبعين.", 12, Ui.MUTED), Ui.lp(-1, -2, Ui.dp(this, 10)));
+    card.addView(markControls);
+    syncMark();
+    return card;
+  }
+
+  private void syncMark() {
+    for (int i = 0; i < markChips.size(); i++) Ui.select(markChips.get(i), (i == 0) == style.markOn);
+    if (markControls != null) markControls.setAlpha(style.markOn ? 1f : .35f);
+  }
+
+  private boolean draggingMark, movedOnPreview, pinching;
+  private float touchX, touchY, startMarkX, startMarkY;
+
+  /** Drag the name to move it, pinch the preview to resize it, tap to play/pause. */
+  private void setupPreviewTouch() {
+    ScaleGestureDetector pinch =
+        new ScaleGestureDetector(
+            this,
+            new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+              public boolean onScaleBegin(ScaleGestureDetector g) {
+                if (!style.markOn) return false;
+                pinching = true;
+                return true;
+              }
+
+              public boolean onScale(ScaleGestureDetector g) {
+                style.markSize = Math.max(.02f, Math.min(.11f, style.markSize * g.getScaleFactor()));
+                LinearLayout sl = sliders.get("markSize");
+                if (sl != null) setSlider("markSize", style.markSize);
+                refreshPreview();
+                return true;
+              }
+
+              public void onScaleEnd(ScaleGestureDetector g) {
+                style.save(EditorActivity.this);
+              }
+            });
+    previewBox.setOnTouchListener(
+        (v, e) -> {
+          pinch.onTouchEvent(e);
+          float w = v.getWidth(), h = v.getHeight();
+          switch (e.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+              v.getParent().requestDisallowInterceptTouchEvent(true);
+              touchX = e.getX();
+              touchY = e.getY();
+              movedOnPreview = false;
+              pinching = false;
+              startMarkX = style.markX;
+              startMarkY = style.markY;
+              draggingMark = style.markOn && hitsMark(e.getX(), e.getY(), w, h);
+              if (draggingMark) v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+              return true;
+            case MotionEvent.ACTION_MOVE:
+              if (Math.hypot(e.getX() - touchX, e.getY() - touchY) > Ui.dp(this, 6)) movedOnPreview = true;
+              if (draggingMark && !pinching && e.getPointerCount() == 1) {
+                float nx = startMarkX + (e.getX() - touchX) / w;
+                float ny = startMarkY + (e.getY() - touchY) / h;
+                if (Math.abs(nx - .5f) < .025f) nx = .5f; // snap to the centre line
+                style.markX = Math.max(.03f, Math.min(.97f, nx));
+                style.markY = Math.max(.02f, Math.min(.98f, ny));
+                refreshPreview();
+              }
+              return true;
+            case MotionEvent.ACTION_UP:
+              if (draggingMark || pinching) style.save(this);
+              else if (!movedOnPreview) togglePlay();
+              draggingMark = false;
+              return true;
+            case MotionEvent.ACTION_CANCEL:
+              draggingMark = false;
+              return true;
+          }
+          return true;
+        });
+  }
+
+  private boolean hitsMark(float x, float y, float w, float h) {
+    String t = style.markText == null ? "" : style.markText.trim();
+    float textH = style.markSize * w;
+    float halfW = Math.max(textH, textH * .33f * t.length()) + Ui.dp(this, 22);
+    float halfH = textH + Ui.dp(this, 22);
+    return Math.abs(x - style.markX * w) < halfW && Math.abs(y - style.markY * h) < halfH;
   }
 
   // ---------------------------------------------------------------- clips tab
