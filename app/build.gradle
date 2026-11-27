@@ -1,0 +1,27 @@
+plugins { id 'com.android.application' }
+android {
+ namespace 'com.mohammed.shorts'
+ compileSdk 35
+ defaultConfig { applicationId 'com.mohammed.shorts'; minSdk 29; targetSdk 35; versionCode 1; versionName '1.0.0' }
+ signingConfigs {
+  personal {
+   // Stable personal key so every CI build installs as an update over the previous one.
+   storeFile file('../signing/shorts-maker.p12')
+   storePassword 'shorts-local'
+   keyAlias 'mohammed'
+   keyPassword 'shorts-local'
+  }
+ }
+ buildTypes {
+  release { minifyEnabled false; signingConfig signingConfigs.personal }
+  debug { signingConfig signingConfigs.personal }
+ }
+ compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+ lint { abortOnError false }
+}
+dependencies {
+ implementation 'androidx.media3:media3-exoplayer:1.6.1'
+ implementation 'androidx.media3:media3-transformer:1.6.1'
+ implementation 'androidx.media3:media3-effect:1.6.1'
+ testImplementation 'junit:junit:4.13.2'
+}
