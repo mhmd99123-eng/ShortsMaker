@@ -29,7 +29,7 @@ final class ShortFrameEffect implements GlEffect {
   @Override
   public GlShaderProgram toGlShaderProgram(Context context, boolean useHdr)
       throws VideoFrameProcessingException {
-    return new Program(style, useHdr);
+    return new Program(context, style, useHdr);
   }
 
   private static final String VERTEX =
@@ -83,7 +83,9 @@ final class ShortFrameEffect implements GlEffect {
           + "uniform vec4 uColor;\n"
           + "uniform sampler2D uMark;\n"
           + "uniform vec4 uMarkRect;\n" // x, y, w, h in output pixels
-          + "uniform vec4 uMarkInfo;\n" // opacity, visible, unused, unused
+          + "uniform vec4 uMarkInfo;\n"
+          + "uniform sampler2D uLayers;\n"
+          + "uniform vec4 uLayerInfo;\n" // opacity, visible, unused, unused
           + "varying vec2 vUv;\n"
           + "float box(vec2 p, vec2 b, float r){\n"
           + "  vec2 q = abs(p) - b + r;\n"
@@ -108,6 +110,10 @@ final class ShortFrameEffect implements GlEffect {
           + "      + texture2D(uTex, local + vec2(-o.x, -o.y)).rgb) * 0.25;\n"
           + "  float a = 1.0 - smoothstep(-0.75, 0.75, d);\n"
           + "  vec3 col = mix(bg, fg, a);\n"
+          + "  if (uLayerInfo.x > 0.5) {\n"
+          + "    vec4 L = texture2D(uLayers, vec2(vUv.x, 1.0 - vUv.y));\n"
+          + "    col = col * (1.0 - L.a) + L.rgb;\n"
+          + "  }\n"
           + "  vec2 mu = (px - uMarkRect.xy) / uMarkRect.zw;\n"
           + "  if (uMarkInfo.y > 0.5 && mu.x >= 0.0 && mu.x <= 1.0 && mu.y >= 0.0 && mu.y <= 1.0) {\n"
           + "    vec4 m = texture2D(uMark, vec2(mu.x, 1.0 - mu.y)) * uMarkInfo.x;\n"
@@ -125,8 +131,13 @@ final class ShortFrameEffect implements GlEffect {
     private int texA = -1, texB = -1, fboA = -1, fboB = -1;
     private int markTex = -1, markW = 2, markH = 2;
     private String markKey = null;
+    private final LayerRenderer renderer = new LayerRenderer();
+    private android.graphics.Bitmap layerBitmap;
+    private android.graphics.Canvas layerCanvas;
+    private int layerTex = -1, drawnVersion = -1;
+    private boolean layersShown;
 
-    Program(ShortStyle style, boolean useHdr) throws VideoFrameProcessingException {
+    Program(Context context, ShortStyle style, boolean useHdr) throws VideoFrameProcessingException {
       super(/* useHighPrecisionColorComponents= */ useHdr, /* texturePoolCapacity= */ 1);
       this.style = style;
       try {
@@ -233,6 +244,31 @@ final class ShortFrameEffect implements GlEffect {
         }
         float mcx = style.markX * outW, mcy = (1f - style.markY) * outH;
 
+        // Layers: painted with a Canvas, uploaded only when they changed or move with time.
+        java.util.List<Layer> layers = style.layers;
+        layersShown = !layers.isEmpty();
+        if (layersShown) {
+          boolean animated = false;
+          for (Layer l : layers) animated |= l.animated();
+          int version = style.layersVersion;
+          if (layerBitmap == null) {
+            layerBitmap = android.graphics.Bitmap.createBitmap(outW, outH, android.graphics.Bitmap.Config.ARGB_8888);
+            layerCanvas = new android.graphics.Canvas(layerBitmap);
+            layerTex = GlUtil.createTexture(layerBitmap);
+          }
+          if (animated || version != drawnVersion) {
+            drawnVersion = version;
+            layerBitmap.eraseColor(0);
+            LayerRenderer.Clock clock = style.clock;
+            long media = clock == null ? presentationTimeUs / 1000 : clock.mediaMs(presentationTimeUs);
+            long clipStart = clock == null ? 0 : clock.clipStartMs();
+            renderer.draw(layerCanvas, outW, outH, layers, media, media - clipStart, style.audio);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, layerTex);
+            android.opengl.GLUtils.texSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, layerBitmap);
+            GlUtil.checkGlError();
+          }
+        }
+
         GlUtil.focusFramebufferUsingCurrentContext(target[0], outW, outH);
         float[] rect =
             ShortStyle.foregroundRect(
@@ -255,6 +291,8 @@ final class ShortFrameEffect implements GlEffect {
               ((color >> 16) & 255) / 255f, ((color >> 8) & 255) / 255f, (color & 255) / 255f, 1f
             });
         compose.setSamplerTexIdUniform("uMark", markTex, 2);
+        compose.setSamplerTexIdUniform("uLayers", layerTex != -1 ? layerTex : markTex, 3);
+        compose.setFloatsUniform("uLayerInfo", new float[] {layersShown && layerTex != -1 ? 1f : 0f, 0f, 0f, 0f});
         compose.setFloatsUniform(
             "uMarkRect", new float[] {mcx - markW / 2f, mcy - markH / 2f, markW, markH});
         compose.setFloatsUniform(
@@ -277,6 +315,9 @@ final class ShortFrameEffect implements GlEffect {
       try {
         releaseSmall();
         if (markTex != -1) GlUtil.deleteTexture(markTex);
+        if (layerTex != -1) GlUtil.deleteTexture(layerTex);
+        if (layerBitmap != null) layerBitmap.recycle();
+        renderer.release();
         down.delete();
         blur.delete();
         compose.delete();

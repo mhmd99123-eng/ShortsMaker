@@ -32,8 +32,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class EditorActivity extends Activity {
   private static final long[] LENGTHS = {15_000, 30_000, 60_000, 90_000, 120_000, 180_000};
   private static final String[] LENGTH_LABELS = {"15ث", "30ث", "60ث", "90ث", "2د", "3د"};
-  private static final String[] TOOL_NAMES = {"قص", "ذكي", "الشكل", "الاسم", "المقاطع"};
-  private static final String[] TOOL_ICONS = {"scissors", "magic", "sliders", "text", "stack"};
+  private static final String[] TOOL_NAMES = {"قص", "ذكي", "إضافة", "الشكل", "الاسم", "المقاطع"};
+  private static final String[] TOOL_ICONS = {"scissors", "magic", "plus", "sliders", "text", "stack"};
 
   private final Handler main = new Handler(Looper.getMainLooper());
   private final ExecutorService io = Executors.newFixedThreadPool(2);
@@ -64,7 +64,7 @@ public final class EditorActivity extends Activity {
   private int openTool = -1;
   private ValueAnimator panelAnim;
   private boolean fullscreen;
-  private View[] tools = new View[5];
+  private View[] tools = new View[6];
 
   // trim panel
   private final List<TextView> lengthChips = new ArrayList<>();
@@ -238,6 +238,7 @@ public final class EditorActivity extends Activity {
             if (player == null) return;
             player.setSeekParameters(finished ? SeekParameters.EXACT : SeekParameters.CLOSEST_SYNC);
             player.seekTo(ms);
+            clock.seek(ms);
             timeline.setPlayhead(ms);
           }
 
@@ -311,9 +312,11 @@ public final class EditorActivity extends Activity {
 
     tools[0] = buildTrim();
     tools[1] = buildSmart();
-    tools[2] = buildLook();
-    tools[3] = buildMarkCard();
-    tools[4] = buildClips();
+    tools[2] = layersPanel = Ui.column(this);
+    tools[3] = buildLook();
+    tools[4] = buildMarkCard();
+    tools[5] = buildClips();
+    loadLayers();
 
     buildBubble();
     buildSheet();
@@ -338,13 +341,15 @@ public final class EditorActivity extends Activity {
 
   private void openTool(int i) {
     if (fullscreen) toggleFullscreen();
+    else if (selected != null && openTool == 2 && editingLayer) select(null);
     if (openTool == i) {
       closePanel();
       return;
     }
     boolean wasOpen = openTool >= 0;
     openTool = i;
-    panelTitle.setText(i == 1 ? "✨ أفضل اللقطات" : i == 3 ? "اسم القناة" : TOOL_NAMES[i]);
+    panelTitle.setText(i == 1 ? "✨ أفضل اللقطات" : i == 2 ? "إضافة" : i == 4 ? "اسم القناة" : TOOL_NAMES[i]);
+    if (i == 2) renderLayersPanel();
     panelBody.removeAllViews();
     View v = tools[i];
     panelBody.addView(v);
@@ -352,7 +357,7 @@ public final class EditorActivity extends Activity {
     v.setTranslationY(dp(14));
     v.animate().alpha(1f).translationY(0).setDuration(280).setInterpolator(Ui.EASE).start();
     for (int k = 0; k < toolButtons.size(); k++) styleTool(k, k == i);
-    int target = (int) (getResources().getDisplayMetrics().heightPixels * (i == 0 ? .30f : .40f));
+    int target = (int) (getResources().getDisplayMetrics().heightPixels * (i == 0 ? .30f : i == 2 ? .44f : .40f));
     animatePanel(target, wasOpen ? 220 : 380);
     hideBubble();
   }
@@ -404,11 +409,87 @@ public final class EditorActivity extends Activity {
 
   // ---------------------------------------------------------------- preview touch
 
-  private boolean draggingMark, pinching;
-  private float touchX, touchY, startMarkX, startMarkY;
+  /** Media time for layers in the preview, extrapolated between UI ticks so waves stay smooth. */
+  static final class PreviewClock implements LayerRenderer.Clock {
+    private volatile long pos, at, clipStart;
+    private volatile boolean playing;
 
-  /** Tap: play/pause · double tap: full screen · drag the name: move it · pinch: resize it. */
+    void update(long p, boolean isPlaying, long start) {
+      pos = p;
+      at = SystemClock.elapsedRealtime();
+      playing = isPlaying;
+      clipStart = start;
+    }
+
+    void seek(long p) {
+      pos = p;
+      at = SystemClock.elapsedRealtime();
+    }
+
+    public long mediaMs(long pts) {
+      return playing ? pos + (SystemClock.elapsedRealtime() - at) : pos;
+    }
+
+    public long clipStartMs() {
+      return clipStart;
+    }
+  }
+
+  private final PreviewClock clock = new PreviewClock();
+  private final LayerRenderer uiRenderer = new LayerRenderer();
+  private View selectionView;
+  private boolean snappedX, snappedY;
+
+  // touch state
+  private int touchMode; // 0 none, 1 layer, 2 name
+  private boolean touchMoved, twoFinger;
+  private float downX, downY, startX, startY, startScale, startRot, startDist, startAngle, startCx, startCy;
+
+  /** Draws the frame around the selected layer, plus centre guides while snapping. */
+  private View buildSelectionView() {
+    return new View(this) {
+      final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+      @Override
+      protected void onDraw(Canvas c) {
+        int W = getWidth(), H = getHeight();
+        p.setStyle(Paint.Style.STROKE);
+        if (snappedX || snappedY) {
+          p.setStrokeWidth(dp(1));
+          p.setColor(0xccffd84a);
+          if (snappedX) c.drawLine(W / 2f, 0, W / 2f, H, p);
+          if (snappedY) c.drawLine(0, H / 2f, W, H / 2f, p);
+        }
+        Layer l = selected;
+        if (l == null || !layers.contains(l)) return;
+        float[] sz = uiRenderer.size(l, W, H);
+        c.save();
+        c.translate(l.x * W, l.y * H);
+        c.rotate(l.rotation);
+        p.setStrokeWidth(dp(1.6f));
+        p.setColor(Ui.ACCENT2);
+        p.setPathEffect(new DashPathEffect(new float[] {dp(6), dp(4)}, 0));
+        c.drawRoundRect(-sz[0] / 2 - dp(4), -sz[1] / 2 - dp(4), sz[0] / 2 + dp(4), sz[1] / 2 + dp(4), dp(6), dp(6), p);
+        p.setPathEffect(null);
+        p.setStyle(Paint.Style.FILL);
+        p.setColor(0xffffffff);
+        float r = dp(4);
+        for (int sx = -1; sx <= 1; sx += 2)
+          for (int sy = -1; sy <= 1; sy += 2)
+            c.drawCircle(sx * (sz[0] / 2 + dp(4)), sy * (sz[1] / 2 + dp(4)), r, p);
+        c.restore();
+      }
+    };
+  }
+
+  /**
+   * One finger on a layer moves it, two fingers resize and rotate it. The channel name moves and
+   * resizes the same way. Tap plays/pauses (or deselects), double tap opens text editing or full
+   * screen.
+   */
   private void setupPreviewTouch() {
+    selectionView = buildSelectionView();
+    previewBox.addView(selectionView, 1, new FrameLayout.LayoutParams(-1, -1));
     GestureDetector taps =
         new GestureDetector(
             this,
@@ -418,70 +499,155 @@ public final class EditorActivity extends Activity {
               }
 
               public boolean onSingleTapConfirmed(MotionEvent e) {
-                if (!draggingMark) togglePlay();
+                if (touchMode == 0) {
+                  if (selected != null) select(null);
+                  else togglePlay();
+                }
                 return true;
               }
 
               public boolean onDoubleTap(MotionEvent e) {
-                toggleFullscreen();
+                Layer hit = layerAt(e.getX(), e.getY());
+                if (hit != null && hit.type == Layer.TEXT) {
+                  select(hit);
+                  if (layerText != null) {
+                    layerText.requestFocus();
+                    layerText.setSelection(layerText.getText().length());
+                    ((android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).showSoftInput(layerText, 0);
+                  }
+                } else toggleFullscreen();
                 return true;
-              }
-            });
-    ScaleGestureDetector pinch =
-        new ScaleGestureDetector(
-            this,
-            new ScaleGestureDetector.SimpleOnScaleGestureListener() {
-              public boolean onScaleBegin(ScaleGestureDetector g) {
-                if (!style.markOn) return false;
-                pinching = true;
-                return true;
-              }
-
-              public boolean onScale(ScaleGestureDetector g) {
-                style.markSize = Math.max(.02f, Math.min(.11f, style.markSize * g.getScaleFactor()));
-                if (sliders.containsKey("markSize")) setSlider("markSize", style.markSize);
-                refreshPreview();
-                return true;
-              }
-
-              public void onScaleEnd(ScaleGestureDetector g) {
-                style.save(EditorActivity.this);
               }
             });
     previewBox.setOnTouchListener(
         (v, e) -> {
-          pinch.onTouchEvent(e);
-          if (!pinching) taps.onTouchEvent(e);
-          float w = v.getWidth(), h = v.getHeight();
+          taps.onTouchEvent(e);
+          float W = v.getWidth(), H = v.getHeight();
           switch (e.getActionMasked()) {
-            case MotionEvent.ACTION_DOWN:
+            case MotionEvent.ACTION_DOWN: {
               v.getParent().requestDisallowInterceptTouchEvent(true);
-              touchX = e.getX();
-              touchY = e.getY();
-              pinching = false;
-              startMarkX = style.markX;
-              startMarkY = style.markY;
-              draggingMark = style.markOn && hitsMark(e.getX(), e.getY(), w, h);
-              if (draggingMark) v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+              downX = e.getX();
+              downY = e.getY();
+              touchMoved = false;
+              twoFinger = false;
+              Layer hit = layerAt(downX, downY);
+              if (hit != null) {
+                touchMode = 1;
+                if (hit != selected) select(hit);
+                startX = hit.x;
+                startY = hit.y;
+                v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+              } else if (style.markOn && hitsMark(downX, downY, W, H)) {
+                touchMode = 2;
+                startX = style.markX;
+                startY = style.markY;
+                v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+              } else touchMode = 0;
               break;
-            case MotionEvent.ACTION_MOVE:
-              if (draggingMark && !pinching && e.getPointerCount() == 1) {
-                float nx = startMarkX + (e.getX() - touchX) / w;
-                float ny = startMarkY + (e.getY() - touchY) / h;
-                if (Math.abs(nx - .5f) < .025f) nx = .5f;
+            }
+            case MotionEvent.ACTION_POINTER_DOWN: {
+              if (e.getPointerCount() != 2) break;
+              if (touchMode == 0) touchMode = selected != null ? 1 : style.markOn ? 2 : 0;
+              if (touchMode == 0) break;
+              twoFinger = true;
+              float dx = e.getX(1) - e.getX(0), dy = e.getY(1) - e.getY(0);
+              startDist = (float) Math.max(1, Math.hypot(dx, dy));
+              startAngle = (float) Math.toDegrees(Math.atan2(dy, dx));
+              startCx = (e.getX(0) + e.getX(1)) / 2;
+              startCy = (e.getY(0) + e.getY(1)) / 2;
+              if (touchMode == 1 && selected != null) {
+                startScale = selected.scale;
+                startRot = selected.rotation;
+                startX = selected.x;
+                startY = selected.y;
+              } else {
+                startScale = style.markSize;
+                startX = style.markX;
+                startY = style.markY;
+              }
+              break;
+            }
+            case MotionEvent.ACTION_MOVE: {
+              if (Math.hypot(e.getX() - downX, e.getY() - downY) > dp(5)) touchMoved = true;
+              if (touchMode == 0) break;
+              float nx, ny;
+              if (twoFinger && e.getPointerCount() >= 2) {
+                float dx = e.getX(1) - e.getX(0), dy = e.getY(1) - e.getY(0);
+                float k = (float) Math.hypot(dx, dy) / startDist;
+                float ang = (float) Math.toDegrees(Math.atan2(dy, dx)) - startAngle;
+                float cx = (e.getX(0) + e.getX(1)) / 2, cy = (e.getY(0) + e.getY(1)) / 2;
+                nx = startX + (cx - startCx) / W;
+                ny = startY + (cy - startCy) / H;
+                if (touchMode == 1 && selected != null) {
+                  float max = selected.type == Layer.TEXT ? .4f : 2f;
+                  selected.scale = Math.max(.015f, Math.min(max, startScale * k));
+                  float rot = startRot + ang;
+                  rot = ((rot + 540) % 360) - 180;
+                  for (int snap = -180; snap <= 180; snap += 90) if (Math.abs(rot - snap) < 4) rot = snap;
+                  selected.rotation = rot;
+                } else {
+                  style.markSize = Math.max(.02f, Math.min(.11f, startScale * k));
+                  if (sliders.containsKey("markSize")) setSlider("markSize", style.markSize);
+                }
+              } else if (!twoFinger) {
+                nx = startX + (e.getX() - downX) / W;
+                ny = startY + (e.getY() - downY) / H;
+              } else break;
+              boolean sx = Math.abs(nx - .5f) < .02f, sy = Math.abs(ny - .5f) < .015f;
+              if ((sx && !snappedX) || (sy && !snappedY)) v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+              snappedX = sx;
+              snappedY = sy;
+              if (sx) nx = .5f;
+              if (sy) ny = .5f;
+              if (touchMode == 1 && selected != null) {
+                selected.x = Math.max(0f, Math.min(1f, nx));
+                selected.y = Math.max(0f, Math.min(1f, ny));
+                pushLayers(false);
+              } else if (touchMode == 2) {
                 style.markX = Math.max(.03f, Math.min(.97f, nx));
                 style.markY = Math.max(.02f, Math.min(.98f, ny));
                 refreshPreview();
               }
+              selectionView.invalidate();
+              break;
+            }
+            case MotionEvent.ACTION_POINTER_UP:
+              // keep the remaining finger from jumping: restart a one-finger drag from here
+              if (e.getPointerCount() == 2 && touchMode != 0) {
+                int keep = e.getActionIndex() == 0 ? 1 : 0;
+                downX = e.getX(keep);
+                downY = e.getY(keep);
+                twoFinger = false;
+                if (touchMode == 1 && selected != null) {
+                  startX = selected.x;
+                  startY = selected.y;
+                } else {
+                  startX = style.markX;
+                  startY = style.markY;
+                }
+              }
               break;
             case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_CANCEL:
-              if (draggingMark || pinching) style.save(this);
-              main.postDelayed(() -> draggingMark = false, 350);
+              snappedX = snappedY = false;
+              selectionView.invalidate();
+              if (touchMode == 1) {
+                pushLayers(true);
+                if (openTool == 2 && editingLayer) renderLayersPanel();
+              } else if (touchMode == 2) style.save(this);
+              if (touchMoved || touchMode != 0) main.postDelayed(() -> touchMode = 0, 350);
               break;
           }
           return true;
         });
+  }
+
+  private Layer layerAt(float x, float y) {
+    int W = previewBox.getWidth(), H = previewBox.getHeight();
+    if (selected != null && uiRenderer.hit(selected, W, H, x, y, dp(14))) return selected;
+    for (int i = layers.size() - 1; i >= 0; i--)
+      if (uiRenderer.hit(layers.get(i), W, H, x, y, dp(10))) return layers.get(i);
+    return null;
   }
 
   private boolean hitsMark(float x, float y, float w, float h) {
@@ -668,11 +834,13 @@ public final class EditorActivity extends Activity {
     io.execute(
         () -> {
           try {
+            AudioData audio = awaitAudio();
             Highlights.Signal s =
                 Highlights.analyze(
                     this,
                     uri,
                     info.durationMs,
+                    audio,
                     new Highlights.Listener() {
                       long lastPost;
 
@@ -979,6 +1147,589 @@ public final class EditorActivity extends Activity {
     if (markControls != null) markControls.setAlpha(style.markOn ? 1f : .35f);
   }
 
+  // ---------------------------------------------------------------- layers (text, stickers, images, video, waves)
+
+  private static final int PICK_IMAGE = 21, PICK_VIDEO = 22, PICK_FONT = 23;
+  private static final String[] STICKERS = {
+    "🔥", "😂", "😱", "🤯", "😍", "👀", "👇", "👆", "👉", "✅", "❌", "⚠️",
+    "💯", "⭐", "❤️", "💡", "🎯", "🚀", "🎮", "📌", "⏰", "💰", "🏆", "🤔",
+    "😎", "🙏", "👏", "💀", "😭", "🤫", "📢", "🔔", "➡️", "⬇️", "🆕", "❓"
+  };
+  private static final int[] COLORS = {
+    0xffffffff, 0xff000000, 0xffffd84a, 0xffff5c7a, 0xff22d3ee, 0xff8b6cff,
+    0xff4ade80, 0xffff8a3d, 0xffff6ab0, 0xff3d8bff, 0xff9ca3af, 0xff7c2d12
+  };
+
+  private final List<Layer> layers = new ArrayList<>();
+  private Layer selected;
+  private boolean editingLayer, stickerMode;
+  private LinearLayout layersPanel;
+  private EditText layerText;
+  private TextView videoProgress;
+  private volatile AudioData audio;
+  private final java.util.concurrent.CountDownLatch audioReady = new java.util.concurrent.CountDownLatch(1);
+
+  private void loadLayers() {
+    layers.clear();
+    layers.addAll(Layer.load(this));
+    pushLayers(false);
+  }
+
+  private final Runnable saveLayers = () -> {
+    List<Layer> copy = new ArrayList<>(layers);
+    io.execute(() -> {
+      Layer.save(this, copy);
+      Layer.cleanFiles(this, copy);
+    });
+  };
+
+  /** Hands the current layers to the GL renderer and refreshes the preview. */
+  private void pushLayers(boolean save) {
+    style.layers = Collections.unmodifiableList(new ArrayList<>(layers));
+    style.layersVersion++;
+    if (selectionView != null) selectionView.invalidate();
+    refreshPreview();
+    if (save) {
+      main.removeCallbacks(saveLayers);
+      main.postDelayed(saveLayers, 400);
+    }
+  }
+
+  private void loadAudio() {
+    io.execute(() -> {
+      try {
+        audio = AudioData.load(this, uri, info.durationMs, new Highlights.Listener() {
+          public void progress(float f) {}
+          public boolean cancelled() { return isDestroyed(); }
+        });
+        style.audio = audio;
+        main.post(this::refreshPreview);
+      } catch (Exception ignored) {
+      } finally {
+        audioReady.countDown();
+      }
+    });
+  }
+
+  private AudioData awaitAudio() throws InterruptedException {
+    audioReady.await();
+    return audio;
+  }
+
+  private void select(Layer l) {
+    selected = l;
+    selectionView.invalidate();
+    if (l == null) {
+      editingLayer = false;
+      if (openTool == 2) renderLayersPanel();
+      return;
+    }
+    editingLayer = true;
+    stickerMode = false;
+    if (openTool != 2) openTool(2);
+    else renderLayersPanel();
+  }
+
+  private void addLayer(Layer l) {
+    layers.add(l);
+    pushLayers(true);
+    select(l);
+  }
+
+  private void renderLayersPanel() {
+    if (layersPanel == null) return;
+    layersPanel.removeAllViews();
+    layerText = null;
+    if (editingLayer && selected != null && layers.contains(selected)) {
+      layersPanel.addView(buildLayerEditor(selected));
+      return;
+    }
+    if (stickerMode) {
+      layersPanel.addView(buildStickerPicker());
+      return;
+    }
+    LinearLayout tiles = Ui.row(this);
+    tiles.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+    addTile(tiles, "نص", "text", () -> addLayer(Layer.text("اكتب هنا")));
+    addTile(tiles, "ملصق", "smile", () -> { stickerMode = true; renderLayersPanel(); });
+    addTile(tiles, "صورة", "image", () -> pick(PICK_IMAGE, "image/*"));
+    addTile(tiles, "فيديو", "video", () -> pick(PICK_VIDEO, "video/*"));
+    addTile(tiles, "موجة", "wave", () -> addLayer(Layer.wave()));
+    layersPanel.addView(tiles);
+    videoProgress = Ui.text(this, "", 13, Ui.ACCENT2);
+    videoProgress.setVisibility(View.GONE);
+    layersPanel.addView(videoProgress, Ui.lp(-1, -2, dp(10)));
+
+    TextView h = Ui.text(this, layers.isEmpty() ? "" : "الطبقات (اللي تحت تطلع فوق)", 13, Ui.MUTED);
+    layersPanel.addView(h, Ui.lp(-1, -2, dp(14)));
+    if (layers.isEmpty()) {
+      TextView e = Ui.text(this, "أضف نص أو ملصق أو صورة أو فيديو أو موجة صوتية.\nتقدر تسحبها فوق المعاينة، وتكبّرها وتلفّها بإصبعين.", 13, Ui.MUTED);
+      e.setGravity(Gravity.CENTER);
+      e.setPadding(dp(12), dp(20), dp(12), dp(20));
+      e.setBackground(Ui.outlined(Ui.CARD, Ui.STROKE, dp(18), dp(1)));
+      layersPanel.addView(e, Ui.lp(-1, -2, dp(8)));
+      return;
+    }
+    for (int i = 0; i < layers.size(); i++) {
+      Layer l = layers.get(i);
+      LinearLayout row = Ui.card(this);
+      row.setOrientation(LinearLayout.HORIZONTAL);
+      row.setGravity(Gravity.CENTER_VERTICAL);
+      row.setPadding(dp(12), dp(8), dp(8), dp(8));
+      ImageView ic = new ImageView(this);
+      ic.setImageDrawable(new Ui.Glyph(l.type == Layer.TEXT ? "text" : l.type == Layer.IMAGE ? "image" : l.type == Layer.VIDEO ? "video" : "wave", Ui.ACCENT2));
+      row.addView(ic, new LinearLayout.LayoutParams(dp(22), dp(22)));
+      TextView t = Ui.text(this, l.label(), 14, Ui.TEXT);
+      t.setSingleLine(true);
+      LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(0, -2, 1);
+      tl.setMarginStart(dp(10));
+      row.addView(t, tl);
+      int idx = i;
+      row.addView(Ui.iconButton(this, "up", "للأمام", () -> moveLayer(idx, 1)), new LinearLayout.LayoutParams(dp(34), dp(34)));
+      LinearLayout.LayoutParams dl = new LinearLayout.LayoutParams(dp(34), dp(34));
+      dl.setMarginStart(dp(4));
+      row.addView(Ui.iconButton(this, "down", "للخلف", () -> moveLayer(idx, -1)), dl);
+      ImageView del = Ui.iconButton(this, "trash", "احذف", () -> removeLayer(l));
+      ((Ui.Glyph) del.getDrawable()).paint.setColor(Ui.DANGER);
+      LinearLayout.LayoutParams xl = new LinearLayout.LayoutParams(dp(34), dp(34));
+      xl.setMarginStart(dp(4));
+      row.addView(del, xl);
+      row.setOnClickListener(v -> select(l));
+      Ui.pressable(row);
+      layersPanel.addView(row, Ui.lp(-1, -2, dp(8)));
+    }
+  }
+
+  private void addTile(LinearLayout parent, String label, String icon, Runnable action) {
+    LinearLayout t = Ui.column(this);
+    t.setGravity(Gravity.CENTER);
+    t.setPadding(0, dp(12), 0, dp(10));
+    t.setBackground(Ui.outlined(Ui.CARD, Ui.STROKE, dp(18), dp(1)));
+    ImageView ic = new ImageView(this);
+    ic.setImageDrawable(new Ui.Glyph(icon, Ui.ACCENT2));
+    t.addView(ic, new LinearLayout.LayoutParams(dp(26), dp(26)));
+    TextView l = Ui.text(this, label, 12, Ui.TEXT);
+    l.setGravity(Gravity.CENTER);
+    t.addView(l, Ui.lp(-2, -2, dp(6)));
+    t.setOnClickListener(v -> action.run());
+    Ui.pressable(t);
+    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -2, 1);
+    lp.setMargins(dp(3), 0, dp(3), 0);
+    parent.addView(t, lp);
+  }
+
+  private void moveLayer(int i, int dir) {
+    int j = i + dir;
+    if (j < 0 || j >= layers.size()) return;
+    Collections.swap(layers, i, j);
+    pushLayers(true);
+    renderLayersPanel();
+  }
+
+  private void removeLayer(Layer l) {
+    layers.remove(l);
+    if (selected == l) selected = null;
+    editingLayer = false;
+    pushLayers(true);
+    renderLayersPanel();
+  }
+
+  private View buildStickerPicker() {
+    LinearLayout c = Ui.column(this);
+    LinearLayout head = Ui.row(this);
+    head.addView(Ui.ghost(this, "رجوع", "back", () -> { stickerMode = false; renderLayersPanel(); }));
+    head.addView(Ui.space(this, dp(8)));
+    head.addView(Ui.ghost(this, "صورة PNG شفافة", "image", () -> { stickerMode = false; pick(PICK_IMAGE, "image/*"); }));
+    c.addView(head);
+    LinearLayout row = null;
+    for (int i = 0; i < STICKERS.length; i++) {
+      if (i % 6 == 0) {
+        row = Ui.row(this);
+        c.addView(row, Ui.lp(-1, -2, dp(8)));
+      }
+      String s = STICKERS[i];
+      TextView t = Ui.text(this, s, 28, Ui.TEXT);
+      t.setGravity(Gravity.CENTER);
+      t.setBackground(Ui.shape(Ui.CARD, dp(14)));
+      t.setOnClickListener(v -> { stickerMode = false; addLayer(Layer.sticker(s)); });
+      Ui.pressable(t);
+      LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(54), 1);
+      lp.setMargins(dp(3), 0, dp(3), 0);
+      row.addView(t, lp);
+    }
+    return c;
+  }
+
+  // ---------------------------------------------------------------- layer editor
+
+  private interface LayerSetter {
+    void set(float v);
+  }
+
+  private LinearLayout layerSlider(String label, float min, float max, float value, java.util.function.Function<Float, String> fmt, LayerSetter s) {
+    return Ui.slider(this, label, min, max, value, fmt, (v, user) -> { s.set(v); pushLayers(user); });
+  }
+
+  private LinearLayout chipRow(String[] labels, int current, java.util.function.IntConsumer pick) {
+    LinearLayout row = Ui.row(this);
+    List<TextView> chips = new ArrayList<>();
+    for (int i = 0; i < labels.length; i++) {
+      int k = i;
+      TextView chip = Ui.chip(this, labels[i], null);
+      chip.setOnClickListener(v -> {
+        for (int j = 0; j < chips.size(); j++) Ui.select(chips.get(j), j == k);
+        pick.accept(k);
+      });
+      Ui.select(chip, i == current);
+      chips.add(chip);
+      LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+      lp.setMarginEnd(dp(8));
+      row.addView(chip, lp);
+    }
+    HorizontalScrollView hs = new HorizontalScrollView(this);
+    hs.setHorizontalScrollBarEnabled(false);
+    hs.addView(row);
+    LinearLayout wrap = Ui.column(this);
+    wrap.addView(hs);
+    return wrap;
+  }
+
+  private View colorRow(int current, java.util.function.IntConsumer pick) {
+    HorizontalScrollView hs = new HorizontalScrollView(this);
+    hs.setHorizontalScrollBarEnabled(false);
+    LinearLayout row = Ui.row(this);
+    List<View> dots = new ArrayList<>();
+    for (int col : COLORS) {
+      View d = new View(this);
+      d.setBackground(Ui.outlined(col, col == current ? Ui.ACCENT2 : Ui.STROKE, dp(16), dp(col == current ? 3 : 1)));
+      d.setOnClickListener(v -> {
+        for (int j = 0; j < dots.size(); j++)
+          dots.get(j).setBackground(Ui.outlined(COLORS[j], COLORS[j] == col ? Ui.ACCENT2 : Ui.STROKE, dp(16), dp(COLORS[j] == col ? 3 : 1)));
+        pick.accept(col);
+      });
+      dots.add(d);
+      LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(32), dp(32));
+      lp.setMarginEnd(dp(8));
+      row.addView(d, lp);
+    }
+    hs.addView(row);
+    return hs;
+  }
+
+  private TextView label(String s) {
+    TextView t = Ui.text(this, s, 13, Ui.MUTED);
+    t.setPadding(0, dp(12), 0, dp(4));
+    return t;
+  }
+
+  private View buildLayerEditor(Layer l) {
+    LinearLayout c = Ui.column(this);
+    LinearLayout head = Ui.row(this);
+    head.addView(Ui.ghost(this, "الطبقات", "back", () -> { editingLayer = false; select(null); }));
+    head.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1));
+    head.addView(Ui.iconButton(this, "copy", "نسخة", () -> {
+      Layer d = l.copy();
+      d.id = java.util.UUID.randomUUID().toString();
+      d.x = Math.min(.95f, l.x + .04f);
+      d.y = Math.min(.95f, l.y + .04f);
+      addLayer(d);
+    }), new LinearLayout.LayoutParams(dp(38), dp(38)));
+    ImageView del = Ui.iconButton(this, "trash", "احذف", () -> removeLayer(l));
+    ((Ui.Glyph) del.getDrawable()).paint.setColor(Ui.DANGER);
+    LinearLayout.LayoutParams dl = new LinearLayout.LayoutParams(dp(38), dp(38));
+    dl.setMarginStart(dp(6));
+    head.addView(del, dl);
+    c.addView(head);
+
+    if (l.type == Layer.TEXT) buildTextEditor(c, l);
+    else if (l.type == Layer.WAVE) buildWaveEditor(c, l);
+    else {
+      c.addView(layerSlider("الحجم", .08f, 1.2f, l.scale, v -> Math.round(v * 100) + "٪", v -> l.scale = v));
+      c.addView(layerSlider("انحناء الزوايا", 0, .5f, l.radius, v -> Math.round(v / .5f * 100) + "٪", v -> l.radius = v));
+      if (l.type == Layer.VIDEO)
+        c.addView(Ui.text(this, "يتكرر طول الشورت. صوت الفيديو المضاف ما ينضاف.", 12, Ui.MUTED), Ui.lp(-1, -2, dp(6)));
+    }
+    c.addView(layerSlider("الوضوح", .1f, 1f, l.opacity, v -> Math.round(v * 100) + "٪", v -> l.opacity = v));
+    c.addView(layerSlider("الدوران", -180, 180, l.rotation, v -> Math.round(v) + "°", v -> l.rotation = v));
+    LinearLayout pos = Ui.row(this);
+    pos.addView(Ui.ghost(this, "بالنص", null, () -> { l.x = .5f; l.y = .5f; pushLayers(true); }), new LinearLayout.LayoutParams(0, dp(42), 1));
+    LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(0, dp(42), 1);
+    pl.setMarginStart(dp(8));
+    pos.addView(Ui.ghost(this, "صفّر الدوران", null, () -> { l.rotation = 0; pushLayers(true); renderLayersPanel(); }), pl);
+    c.addView(pos, Ui.lp(-1, -2, dp(10)));
+    c.addView(Ui.text(this, "👆 اسحبها فوق المعاينة، وبإصبعين كبّر وصغّر ولف.", 12, Ui.MUTED), Ui.lp(-1, -2, dp(10)));
+    return c;
+  }
+
+  private void buildTextEditor(LinearLayout c, Layer l) {
+    layerText = new EditText(this);
+    layerText.setText(l.text);
+    layerText.setMaxLines(4);
+    layerText.setTextColor(Ui.TEXT);
+    layerText.setHintTextColor(Ui.MUTED);
+    layerText.setHint("اكتب النص");
+    layerText.setTextSize(16);
+    layerText.setPadding(dp(14), dp(10), dp(14), dp(10));
+    layerText.setBackground(Ui.outlined(Ui.CARD, Ui.STROKE, dp(14), dp(1)));
+    layerText.addTextChangedListener(new android.text.TextWatcher() {
+      public void beforeTextChanged(CharSequence a, int b, int c2, int d) {}
+      public void onTextChanged(CharSequence a, int b, int c2, int d) {}
+      public void afterTextChanged(android.text.Editable e) { l.text = e.toString(); pushLayers(true); }
+    });
+    c.addView(layerText, Ui.lp(-1, -2, dp(10)));
+
+    c.addView(label("الخط"));
+    HorizontalScrollView hs = new HorizontalScrollView(this);
+    hs.setHorizontalScrollBarEnabled(false);
+    LinearLayout fonts = Ui.row(this);
+    TextView add = Ui.chip(this, "+ استيراد خط", () -> pick(PICK_FONT, "*/*"));
+    add.setTextColor(Ui.ACCENT2);
+    LinearLayout.LayoutParams al = new LinearLayout.LayoutParams(-2, -2);
+    al.setMarginEnd(dp(8));
+    fonts.addView(add, al);
+    List<TextView> chips = new ArrayList<>();
+    for (Fonts.Entry f : Fonts.all(this)) {
+      TextView chip = Ui.chip(this, "أبجد Abc", null);
+      chip.setTypeface(Fonts.get(f.key));
+      chip.setTextSize(15);
+      chip.setContentDescription(f.name);
+      chip.setOnClickListener(v -> {
+        l.font = f.key;
+        for (TextView x : chips) Ui.select(x, x == chip);
+        pushLayers(true);
+      });
+      if (f.key.startsWith("file:"))
+        chip.setOnLongClickListener(v -> {
+          Fonts.delete(f.key);
+          if (f.key.equals(l.font)) l.font = Fonts.DEFAULT;
+          pushLayers(true);
+          renderLayersPanel();
+          Ui.toast(this, "انحذف الخط");
+          return true;
+        });
+      Ui.select(chip, f.key.equals(l.font));
+      chips.add(chip);
+      LinearLayout box = Ui.column(this);
+      box.setGravity(Gravity.CENTER_HORIZONTAL);
+      box.addView(chip);
+      TextView n = Ui.text(this, f.name, 10, Ui.MUTED);
+      n.setGravity(Gravity.CENTER);
+      n.setMaxWidth(dp(110));
+      n.setSingleLine(true);
+      box.addView(n);
+      LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+      lp.setMarginEnd(dp(8));
+      fonts.addView(box, lp);
+    }
+    hs.addView(fonts);
+    c.addView(hs);
+
+    c.addView(label("لون النص"));
+    c.addView(colorRow(l.color, col -> { l.color = col; pushLayers(true); }));
+    c.addView(layerSlider("الحجم", .02f, .25f, l.scale, v -> Math.round(v * 1000) / 10f + "", v -> l.scale = v));
+    c.addView(label("المحاذاة"));
+    c.addView(chipRow(new String[] {"وسط", "يمين", "يسار"}, l.align, k -> { l.align = k; pushLayers(true); }));
+    c.addView(layerSlider("الحدود", 0, .25f, l.stroke, v -> Math.round(v / .25f * 100) + "٪", v -> l.stroke = v));
+    c.addView(label("لون الحدود"));
+    c.addView(colorRow(l.strokeColor, col -> { l.strokeColor = col; pushLayers(true); }));
+    c.addView(label("الخلفية"));
+    c.addView(chipRow(new String[] {"بدون", "صندوق", "شفاف"}, l.bg, k -> { l.bg = k; pushLayers(true); }));
+    c.addView(label("لون الخلفية"));
+    c.addView(colorRow(l.bgColor, col -> { l.bgColor = col; pushLayers(true); }));
+    c.addView(label("الظل"));
+    c.addView(chipRow(new String[] {"مع ظل", "بدون"}, l.shadow ? 0 : 1, k -> { l.shadow = k == 0; pushLayers(true); }));
+  }
+
+  private void buildWaveEditor(LinearLayout c, Layer l) {
+    c.addView(label("الشكل"));
+    c.addView(chipRow(new String[] {"أعمدة", "متناظرة", "موجة", "دائرية", "نقاط", "طيف"}, l.waveStyle, k -> {
+      l.waveStyle = k;
+      if (k == 3 && l.aspect < .8f) l.aspect = 1f;
+      pushLayers(true);
+    }));
+    c.addView(label("اللون"));
+    c.addView(chipRow(new String[] {"تدرّج", "لون واحد"}, l.gradient ? 0 : 1, k -> { l.gradient = k == 0; pushLayers(true); }));
+    c.addView(colorRow(l.color, col -> { l.color = col; l.gradient = false; pushLayers(true); renderLayersPanel(); }), Ui.lp(-1, -2, dp(8)));
+    c.addView(layerSlider("عدد الأعمدة", 8, 64, l.bars, v -> String.valueOf(Math.round(v)), v -> l.bars = Math.round(v)));
+    c.addView(layerSlider("الحساسية", .3f, 2.5f, l.sensitivity, v -> Math.round(v * 100) + "٪", v -> l.sensitivity = v));
+    c.addView(layerSlider("العرض", .2f, 1.2f, l.scale, v -> Math.round(v * 100) + "٪", v -> l.scale = v));
+    c.addView(layerSlider("الارتفاع", .08f, 1.2f, l.aspect, v -> Math.round(v * 100) + "٪", v -> l.aspect = v));
+    if (audio == null || !audio.hasAudio)
+      c.addView(Ui.text(this, audio == null ? "جارٍ قراءة صوت الفيديو…" : "الفيديو ما فيه صوت، فالموجة بتكون ساكنة.", 12, Ui.MUTED), Ui.lp(-1, -2, dp(6)));
+  }
+
+  // ---------------------------------------------------------------- pickers
+
+  private void pick(int code, String type) {
+    Intent i;
+    if (code == PICK_FONT) {
+      i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
+          .putExtra(Intent.EXTRA_MIME_TYPES, new String[] {"font/ttf", "font/otf", "font/sfnt", "application/x-font-ttf", "application/x-font-otf", "application/font-sfnt", "application/vnd.ms-opentype", "application/octet-stream"});
+    } else if (Build.VERSION.SDK_INT >= 33) {
+      i = new Intent(android.provider.MediaStore.ACTION_PICK_IMAGES).setType(type);
+    } else {
+      i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType(type);
+    }
+    try {
+      startActivityForResult(i, code);
+    } catch (Exception e) {
+      startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType(type), code);
+    }
+  }
+
+  @Override
+  protected void onActivityResult(int req, int res, Intent data) {
+    super.onActivityResult(req, res, data);
+    if (res != RESULT_OK || data == null || data.getData() == null) return;
+    Uri u = data.getData();
+    if (req == PICK_FONT) {
+      io.execute(() -> {
+        try {
+          String key = Fonts.importFont(this, u);
+          main.post(() -> {
+            if (selected != null && selected.type == Layer.TEXT) {
+              selected.font = key;
+              pushLayers(true);
+            }
+            renderLayersPanel();
+            Ui.toast(this, "انضاف الخط ✓");
+          });
+        } catch (Exception e) {
+          main.post(() -> Ui.toast(this, e.getMessage()));
+        }
+      });
+    } else if (req == PICK_IMAGE) {
+      io.execute(() -> {
+        try {
+          Bitmap b = android.graphics.ImageDecoder.decodeBitmap(
+              android.graphics.ImageDecoder.createSource(getContentResolver(), u),
+              (dec, inf, src) -> {
+                int w = inf.getSize().getWidth(), h = inf.getSize().getHeight();
+                float k = Math.min(1f, 1280f / Math.max(w, h));
+                dec.setTargetSize(Math.max(1, Math.round(w * k)), Math.max(1, Math.round(h * k)));
+                dec.setAllocator(android.graphics.ImageDecoder.ALLOCATOR_SOFTWARE);
+              });
+          java.io.File f = new java.io.File(Layer.dir(this), "img_" + java.util.UUID.randomUUID() + ".png");
+          try (java.io.FileOutputStream o = new java.io.FileOutputStream(f)) {
+            b.compress(Bitmap.CompressFormat.PNG, 100, o);
+          }
+          Layer l = new Layer();
+          l.type = Layer.IMAGE;
+          l.path = f.getAbsolutePath();
+          l.aspect = b.getHeight() / (float) b.getWidth();
+          l.scale = l.aspect > 1.2f ? .42f : .6f;
+          b.recycle();
+          main.post(() -> addLayer(l));
+        } catch (Exception e) {
+          main.post(() -> Ui.toast(this, "ما قدرت أفتح الصورة"));
+        }
+      });
+    } else if (req == PICK_VIDEO) {
+      extractVideo(u);
+    }
+  }
+
+  /** Turns a picked video into small JPEG frames (max 20 s at 24 fps) so it can loop on top. */
+  private void extractVideo(Uri u) {
+    if (videoProgress != null) {
+      videoProgress.setVisibility(View.VISIBLE);
+      videoProgress.setText("جارٍ تجهيز الفيديو… 0٪");
+    }
+    io.execute(() -> {
+      MediaMetadataRetriever r = new MediaMetadataRetriever();
+      java.io.File dir = new java.io.File(Layer.dir(this), "vid_" + java.util.UUID.randomUUID());
+      try {
+        r.setDataSource(this, u);
+        Clip.Info vi = Clip.Info.read(this, u);
+        float fps = 24f;
+        long len = Math.min(20_000, vi.durationMs);
+        int count = Math.max(1, (int) (len * fps / 1000));
+        dir.mkdirs();
+        float k = Math.min(1f, 640f / Math.max(vi.width, vi.height));
+        int tw = Math.max(2, Math.round(vi.width * k)), th = Math.max(2, Math.round(vi.height * k));
+        String fc = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT);
+        int total = fc == null ? 0 : Integer.parseInt(fc.trim());
+        float srcFps = total > 0 ? total * 1000f / vi.durationMs : 30f;
+        int written = 0;
+        int nextSrc = 0;
+        boolean sequential = total > 0;
+        int batch = 6;
+        for (int i = 0; i < count && !isDestroyed(); ) {
+          List<Bitmap> got = null;
+          int target = Math.round(i * srcFps / fps);
+          if (sequential) {
+            try {
+              MediaMetadataRetriever.BitmapParams bp = new MediaMetadataRetriever.BitmapParams();
+              bp.setPreferredConfig(Bitmap.Config.RGB_565);
+              int n = Math.min(batch, total - target);
+              if (n <= 0) break;
+              got = r.getFramesAtIndex(target, n, bp);
+              if (got == null || got.isEmpty()) {
+                got = null;
+                sequential = false;
+              }
+            } catch (Exception e) {
+              sequential = false;
+            }
+          }
+          if (got != null) {
+            // keep the frames that land on our 24 fps grid
+            for (int j = 0; j < got.size() && i < count; j++) {
+              int src = target + j;
+              Bitmap b = got.get(j);
+              if (Math.round(i * srcFps / fps) == src) {
+                save(b, tw, th, new java.io.File(dir, String.format(Locale.US, "f%05d.jpg", i)));
+                i++;
+                written++;
+              }
+              b.recycle();
+            }
+            if (Math.round(i * srcFps / fps) < target + got.size()) continue;
+          } else {
+            Bitmap b = r.getScaledFrameAtTime(i * 1000_000L / (long) fps, MediaMetadataRetriever.OPTION_CLOSEST, tw, th);
+            if (b != null) {
+              save(b, tw, th, new java.io.File(dir, String.format(Locale.US, "f%05d.jpg", i)));
+              b.recycle();
+              written++;
+            }
+            i++;
+          }
+          int pct = Math.round(i * 100f / count);
+          main.post(() -> { if (videoProgress != null) videoProgress.setText("جارٍ تجهيز الفيديو… " + pct + "٪"); });
+        }
+        if (written == 0) throw new Exception();
+        Layer l = new Layer();
+        l.type = Layer.VIDEO;
+        l.path = dir.getAbsolutePath();
+        l.frames = written;
+        l.fps = fps;
+        l.aspect = th / (float) tw;
+        l.scale = l.aspect > 1.2f ? .4f : .6f;
+        l.radius = .06f;
+        main.post(() -> {
+          if (videoProgress != null) videoProgress.setVisibility(View.GONE);
+          addLayer(l);
+        });
+      } catch (Exception e) {
+        main.post(() -> {
+          if (videoProgress != null) videoProgress.setVisibility(View.GONE);
+          Ui.toast(this, "ما قدرت أجهّز الفيديو");
+        });
+      } finally {
+        try { r.release(); } catch (Exception ignored) {}
+      }
+    });
+  }
+
+  private static void save(Bitmap b, int w, int h, java.io.File f) throws java.io.IOException {
+    Bitmap s = b.getWidth() == w && b.getHeight() == h ? b : Bitmap.createScaledBitmap(b, w, h, true);
+    try (java.io.FileOutputStream o = new java.io.FileOutputStream(f)) {
+      s.compress(Bitmap.CompressFormat.JPEG, 84, o);
+    }
+    if (s != b) s.recycle();
+  }
+
+
   // ---------------------------------------------------------------- clips tool
 
   private View buildClips() {
@@ -1008,7 +1759,7 @@ public final class EditorActivity extends Activity {
   private void renderQueue() {
     if (queueTitle == null) return;
     queueTitle.setText("كل مقطع يطلع شورت مستقل، وتصدّرها كلها مرة وحدة.");
-    TextView label = (TextView) toolButtons.get(4).getChildAt(1);
+    TextView label = (TextView) toolButtons.get(5).getChildAt(1);
     label.setText(queue.isEmpty() ? "المقاطع" : "المقاطع " + queue.size());
     timeline.setQueued(queue);
     exportButtonTop.setText(queue.size() > 1 ? "تصدير " + queue.size() : "تصدير");
@@ -1178,6 +1929,8 @@ public final class EditorActivity extends Activity {
     if (info == null || ExportService.status.running) return;
     List<Clip> clips = clipsToExport();
     style.save(this);
+    main.removeCallbacks(saveLayers);
+    Layer.save(this, layers);
     int w = quality == 0 ? 720 : quality == 1 ? 1080 : 1440;
     Intent i =
         new Intent(this, ExportService.class)
@@ -1264,11 +2017,13 @@ public final class EditorActivity extends Activity {
     syncEdgeCards();
     setupPlayer();
     loadThumbs();
+    loadAudio();
     if (ExportService.status.running) showSheet(true);
   }
 
   private void setupPlayer() {
     player = new ExoPlayer.Builder(this).build();
+    style.clock = clock;
     if (effectsOn) player.setVideoEffects(Collections.singletonList(new ShortFrameEffect(style)));
     player.setVideoTextureView(texture);
     player.setMediaItem(MediaItem.fromUri(uri));
@@ -1310,6 +2065,7 @@ public final class EditorActivity extends Activity {
         pos = timeline.start();
       }
       timeline.setPlayhead(pos);
+      clock.update(pos, player.isPlaying(), timeline.start());
       overview.invalidate();
       long len = timeline.end() - timeline.start();
       long in = Math.max(0, Math.min(len, pos - timeline.start()));

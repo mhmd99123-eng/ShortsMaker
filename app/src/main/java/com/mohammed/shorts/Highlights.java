@@ -2,17 +2,11 @@ package com.mohammed.shorts;
 
 import android.content.Context;
 import android.graphics.Bitmap;
-import android.media.MediaCodec;
-import android.media.MediaExtractor;
-import android.media.MediaFormat;
 import android.media.MediaMetadataRetriever;
 import android.net.Uri;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Finds the most interesting parts of a video, completely offline.
@@ -42,228 +36,117 @@ final class Highlights {
 
   // ---------------------------------------------------------------- analysis (Android)
 
-  static Signal analyze(Context c, Uri uri, long durationMs, Listener l) throws Exception {
+  /**
+   * Visual signals come from key frames only (no full decoding), sampled by two retrievers in
+   * parallel; audio comes from the shared, cached {@link AudioData}.
+   */
+  static Signal analyze(Context c, Uri uri, long durationMs, AudioData audio, Listener l)
+      throws Exception {
     int bins = (int) Math.max(1, (durationMs + BIN_MS - 1) / BIN_MS);
     Signal s = new Signal();
     s.durationMs = durationMs;
-    s.loudDb = new float[bins];
     s.motion = new float[bins];
     s.cut = new float[bins];
-    Arrays.fill(s.loudDb, -90f);
-    float[] audioDone = {0}, videoDone = {0};
-    AtomicReference<Exception> failure = new AtomicReference<>();
-    Listener audioL =
-        new Listener() {
-          public void progress(float f) {
-            audioDone[0] = f;
-            l.progress(audioDone[0] * .45f + videoDone[0] * .55f);
-          }
-
-          public boolean cancelled() {
-            return l.cancelled();
-          }
-        };
-    Listener videoL =
-        new Listener() {
-          public void progress(float f) {
-            videoDone[0] = f;
-            l.progress(audioDone[0] * .45f + videoDone[0] * .55f);
-          }
-
-          public boolean cancelled() {
-            return l.cancelled();
-          }
-        };
-    Thread audio =
-        new Thread(
-            () -> {
-              try {
-                s.hasAudio = readAudio(c, uri, s.loudDb, audioL);
-              } catch (Exception e) {
-                // A video without readable audio still gets a visual-only analysis.
-                s.hasAudio = false;
-              }
-            },
-            "highlights-audio");
-    audio.start();
-    try {
-      readVideo(c, uri, durationMs, s.motion, s.cut, videoL);
-    } catch (Exception e) {
-      failure.set(e);
-    }
-    audio.join();
+    s.hasAudio = audio != null && audio.hasAudio;
+    s.loudDb = s.hasAudio ? audio.loudDb(BIN_MS, bins) : new float[bins];
+    if (!s.hasAudio) Arrays.fill(s.loudDb, -90f);
+    readVideo(c, uri, durationMs, s.motion, s.cut, l);
     if (l.cancelled()) throw new InterruptedException();
-    if (failure.get() != null && !s.hasAudio) throw failure.get();
     return s;
   }
 
-  private static boolean readAudio(Context c, Uri uri, float[] outDb, Listener l)
-      throws Exception {
-    MediaExtractor ex = new MediaExtractor();
-    MediaCodec codec = null;
-    try {
-      ex.setDataSource(c, uri, null);
-      int track = -1;
-      MediaFormat format = null;
-      for (int i = 0; i < ex.getTrackCount(); i++) {
-        MediaFormat f = ex.getTrackFormat(i);
-        String mime = f.getString(MediaFormat.KEY_MIME);
-        if (mime != null && mime.startsWith("audio/")) {
-          track = i;
-          format = f;
-          break;
-        }
-      }
-      if (track < 0) return false;
-      ex.selectTrack(track);
-      long durationUs = format.containsKey(MediaFormat.KEY_DURATION) ? format.getLong(MediaFormat.KEY_DURATION) : 0;
-      codec = MediaCodec.createDecoderByType(format.getString(MediaFormat.KEY_MIME));
-      codec.configure(format, null, null, 0);
-      codec.start();
-      int sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE);
-      int channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
-      int encoding = 2; // ENCODING_PCM_16BIT
-      double[] sum = new double[outDb.length];
-      long[] count = new long[outDb.length];
-      MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
-      boolean inputDone = false, outputDone = false;
-      long frameIndex = 0; // audio frames (samples per channel) decoded so far
-      long firstPtsUs = -1;
-      while (!outputDone) {
-        if (l.cancelled()) return false;
-        if (!inputDone) {
-          int in = codec.dequeueInputBuffer(5000);
-          if (in >= 0) {
-            ByteBuffer buf = codec.getInputBuffer(in);
-            int size = ex.readSampleData(buf, 0);
-            if (size < 0) {
-              codec.queueInputBuffer(in, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
-              inputDone = true;
-            } else {
-              codec.queueInputBuffer(in, 0, size, ex.getSampleTime(), 0);
-              ex.advance();
-            }
-          }
-        }
-        int out = codec.dequeueOutputBuffer(info, 5000);
-        if (out == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-          MediaFormat f = codec.getOutputFormat();
-          sampleRate = f.getInteger(MediaFormat.KEY_SAMPLE_RATE);
-          channels = f.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
-          if (f.containsKey(MediaFormat.KEY_PCM_ENCODING))
-            encoding = f.getInteger(MediaFormat.KEY_PCM_ENCODING);
-        } else if (out >= 0) {
-          if (info.size > 0) {
-            ByteBuffer buf = codec.getOutputBuffer(out);
-            buf.position(info.offset);
-            buf.limit(info.offset + info.size);
-            buf.order(ByteOrder.LITTLE_ENDIAN);
-            if (firstPtsUs < 0) firstPtsUs = info.presentationTimeUs;
-            // Use the buffer's own timestamp so gaps or edit lists do not shift the curve.
-            long baseFrame = Math.max(frameIndex, (info.presentationTimeUs - Math.max(0, firstPtsUs)) * sampleRate / 1_000_000L);
-            int bytesPerSample = encoding == 4 ? 4 : 2; // 4 = ENCODING_PCM_FLOAT
-            int frames = info.size / (bytesPerSample * channels);
-            long samplesPerBin = Math.max(1, sampleRate * BIN_MS / 1000);
-            for (int f = 0; f < frames; f++) {
-              double mix = 0;
-              for (int ch = 0; ch < channels; ch++) {
-                mix += bytesPerSample == 4 ? buf.getFloat() : buf.getShort() / 32768.0;
-              }
-              mix /= channels;
-              int bin = (int) ((baseFrame + f) / samplesPerBin);
-              if (bin >= 0 && bin < sum.length) {
-                sum[bin] += mix * mix;
-                count[bin]++;
-              }
-            }
-            frameIndex = baseFrame + frames;
-            if (durationUs > 0) l.progress(Math.min(1f, info.presentationTimeUs / (float) durationUs));
-          }
-          codec.releaseOutputBuffer(out, false);
-          if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) outputDone = true;
-        }
-      }
-      for (int i = 0; i < outDb.length; i++) {
-        if (count[i] == 0) continue;
-        double rms = Math.sqrt(sum[i] / count[i]);
-        outDb[i] = (float) Math.max(-90, 20 * Math.log10(rms + 1e-9));
-      }
-      l.progress(1f);
-      return true;
-    } finally {
-      if (codec != null) {
-        try {
-          codec.stop();
-        } catch (Exception ignored) {
-        }
-        codec.release();
-      }
-      ex.release();
+  private static final class Frame {
+    int[] luma;
+    float[] hist;
+  }
+
+  private static Frame grab(MediaMetadataRetriever r, long ms) {
+    Bitmap b = r.getScaledFrameAtTime(ms * 1000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 48, 48);
+    if (b == null) return null;
+    int w = b.getWidth(), h = b.getHeight();
+    int[] px = new int[w * h];
+    b.getPixels(px, 0, w, 0, 0, w, h);
+    b.recycle();
+    Frame f = new Frame();
+    f.luma = new int[px.length];
+    f.hist = new float[24];
+    for (int k = 0; k < px.length; k++) {
+      int p = px[k], rr = (p >> 16) & 255, gg = (p >> 8) & 255, bb = p & 255;
+      f.luma[k] = (rr * 299 + gg * 587 + bb * 114) / 1000;
+      f.hist[rr >> 5]++;
+      f.hist[8 + (gg >> 5)]++;
+      f.hist[16 + (bb >> 5)]++;
     }
+    for (int k = 0; k < 24; k++) f.hist[k] /= px.length;
+    return f;
   }
 
   private static void readVideo(
       Context c, Uri uri, long durationMs, float[] motion, float[] cut, Listener l)
       throws Exception {
-    MediaMetadataRetriever r = new MediaMetadataRetriever();
-    try {
-      r.setDataSource(c, uri);
-      // At most ~480 decoded thumbnails, at least one per second.
-      long stepMs = Math.max(1000, durationMs / 480);
-      int samples = (int) Math.max(1, durationMs / stepMs);
-      float[] times = new float[samples], mot = new float[samples], cuts = new float[samples];
-      int[] prev = null;
-      float[] prevHist = null;
-      for (int i = 0; i < samples; i++) {
-        if (l.cancelled()) return;
-        long t = i * stepMs + stepMs / 2;
-        Bitmap b =
-            r.getScaledFrameAtTime(t * 1000, MediaMetadataRetriever.OPTION_CLOSEST, 64, 64);
-        times[i] = t;
-        if (b == null) continue;
-        int w = b.getWidth(), h = b.getHeight();
-        int[] px = new int[w * h];
-        b.getPixels(px, 0, w, 0, 0, w, h);
-        b.recycle();
-        int[] luma = new int[px.length];
-        float[] hist = new float[24];
-        for (int k = 0; k < px.length; k++) {
-          int p = px[k], rr = (p >> 16) & 255, gg = (p >> 8) & 255, bb = p & 255;
-          luma[k] = (rr * 299 + gg * 587 + bb * 114) / 1000;
-          hist[rr >> 5]++;
-          hist[8 + (gg >> 5)]++;
-          hist[16 + (bb >> 5)]++;
-        }
-        for (int k = 0; k < 24; k++) hist[k] /= px.length;
-        if (prev != null && prev.length == luma.length) {
-          long diff = 0;
-          for (int k = 0; k < luma.length; k++) diff += Math.abs(luma[k] - prev[k]);
-          mot[i] = diff / (255f * luma.length);
-          float hd = 0;
-          for (int k = 0; k < 24; k++) hd += Math.abs(hist[k] - prevHist[k]);
-          cuts[i] = Math.min(1f, hd / 3f); // three channels, each sums to 1 → max 6, /3 → 0…2
-        }
-        prev = luma;
-        prevHist = hist;
-        l.progress((i + 1f) / samples);
-      }
-      // Spread the samples over the half-second bins.
-      for (int b = 0; b < motion.length; b++) {
-        float t = b * BIN_MS + BIN_MS / 2f;
-        int i = (int) Math.min(samples - 1, Math.max(0, Math.floor((t - stepMs / 2f) / stepMs)));
-        int j = Math.min(samples - 1, i + 1);
-        float f = j == i ? 0 : Math.max(0, Math.min(1, (t - times[i]) / (times[j] - times[i])));
-        motion[b] = mot[i] * (1 - f) + mot[j] * f;
-      }
-      for (int i = 0; i < samples; i++) {
-        int b = (int) Math.min(motion.length - 1, Math.max(0, (times[i] - stepMs / 2f) / BIN_MS));
-        cut[b] = Math.max(cut[b], cuts[i] > .45f ? cuts[i] : 0);
-      }
-    } finally {
-      try {
-        r.release();
-      } catch (Exception ignored) {
-      }
+    long stepMs = Math.max(1000, durationMs / 300);
+    int samples = (int) Math.max(2, durationMs / stepMs);
+    Frame[] frames = new Frame[samples];
+    int[] done = {0};
+    int workers = 2;
+    Thread[] threads = new Thread[workers];
+    Exception[] error = {null};
+    for (int w = 0; w < workers; w++) {
+      int from = w * samples / workers, to = (w + 1) * samples / workers;
+      threads[w] =
+          new Thread(
+              () -> {
+                MediaMetadataRetriever r = new MediaMetadataRetriever();
+                try {
+                  r.setDataSource(c, uri);
+                  for (int i = from; i < to && !l.cancelled(); i++) {
+                    frames[i] = grab(r, i * stepMs + stepMs / 2);
+                    synchronized (done) {
+                      done[0]++;
+                      l.progress(done[0] / (float) samples);
+                    }
+                  }
+                } catch (Exception e) {
+                  error[0] = e;
+                } finally {
+                  try {
+                    r.release();
+                  } catch (Exception ignored) {
+                  }
+                }
+              },
+              "highlights-video-" + w);
+      threads[w].start();
+    }
+    for (Thread t : threads) t.join();
+    if (error[0] != null && frames[0] == null) throw error[0];
+    float[] mot = new float[samples], cuts = new float[samples];
+    boolean[] valid = new boolean[samples];
+    for (int i = 1; i < samples; i++) {
+      Frame a = frames[i - 1], b = frames[i];
+      if (a == null || b == null || a.luma.length != b.luma.length) continue;
+      long diff = 0;
+      for (int k = 0; k < b.luma.length; k++) diff += Math.abs(b.luma[k] - a.luma[k]);
+      if (diff == 0) continue; // same key frame returned twice: no information
+      valid[i] = true;
+      mot[i] = diff / (255f * b.luma.length);
+      float hd = 0;
+      for (int k = 0; k < 24; k++) hd += Math.abs(b.hist[k] - a.hist[k]);
+      cuts[i] = Math.min(1f, hd / 3f);
+    }
+    // fill gaps from neighbours
+    float last = 0;
+    for (int i = 0; i < samples; i++) {
+      if (valid[i]) last = mot[i];
+      else mot[i] = last;
+    }
+    for (int b = 0; b < motion.length; b++) {
+      int i = (int) Math.min(samples - 1, Math.max(0, (b * BIN_MS) / stepMs));
+      motion[b] = mot[i];
+    }
+    for (int i = 0; i < samples; i++) {
+      int b = (int) Math.min(motion.length - 1, Math.max(0, (i * stepMs) / BIN_MS));
+      cut[b] = Math.max(cut[b], cuts[i] > .45f ? cuts[i] : 0);
     }
   }
 

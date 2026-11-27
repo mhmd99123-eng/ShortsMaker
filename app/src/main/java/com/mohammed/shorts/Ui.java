@@ -487,6 +487,45 @@ final class Ui {
           c.drawLine(9, 20, 4, 20, paint);
           c.drawLine(4, 20, 4, 15, paint);
           break;
+        case "image":
+          c.drawRoundRect(3, 5, 21, 19, 3, 3, paint);
+          c.drawCircle(9, 10, 1.8f, paint);
+          p.moveTo(4, 17);
+          p.lineTo(10, 12.5f);
+          p.lineTo(14, 15.5f);
+          p.lineTo(17, 13);
+          p.lineTo(20.5f, 16);
+          c.drawPath(p, paint);
+          break;
+        case "wave":
+          c.drawLine(4, 10, 4, 14, paint);
+          c.drawLine(8, 6, 8, 18, paint);
+          c.drawLine(12, 3.5f, 12, 20.5f, paint);
+          c.drawLine(16, 7.5f, 16, 16.5f, paint);
+          c.drawLine(20, 10.5f, 20, 13.5f, paint);
+          break;
+        case "smile":
+          c.drawCircle(12, 12, 8.5f, paint);
+          c.drawArc(8, 9, 16, 16.5f, 20, 140, false, paint);
+          paint.setStyle(Paint.Style.FILL);
+          c.drawCircle(9.2f, 9.8f, 1.1f, paint);
+          c.drawCircle(14.8f, 9.8f, 1.1f, paint);
+          break;
+        case "copy":
+          c.drawRoundRect(8, 8, 20, 20, 2.5f, 2.5f, paint);
+          c.drawLine(4, 15, 4, 6, paint);
+          c.drawLine(4, 4, 15, 4, paint);
+          break;
+        case "up":
+          c.drawLine(12, 19, 12, 5, paint);
+          c.drawLine(12, 5, 6.5f, 10.5f, paint);
+          c.drawLine(12, 5, 17.5f, 10.5f, paint);
+          break;
+        case "down":
+          c.drawLine(12, 5, 12, 19, paint);
+          c.drawLine(12, 19, 6.5f, 13.5f, paint);
+          c.drawLine(12, 19, 17.5f, 13.5f, paint);
+          break;
         default:
           c.drawCircle(12, 12, 8, paint);
       }

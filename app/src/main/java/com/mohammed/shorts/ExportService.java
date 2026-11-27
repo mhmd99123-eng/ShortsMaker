@@ -44,6 +44,26 @@ public final class ExportService extends Service {
   private boolean cap30;
   private File temp;
   private long clipStartedAt;
+  private boolean needsAudio;
+
+  /** Media time for the layers: the clip's start plus the time since its first frame. */
+  private static final class ExportClock implements LayerRenderer.Clock {
+    private final long clipStart;
+    private long firstPts = -1;
+
+    ExportClock(long clipStart) {
+      this.clipStart = clipStart;
+    }
+
+    public synchronized long mediaMs(long pts) {
+      if (firstPts < 0) firstPts = pts;
+      return clipStart + Math.max(0, pts - firstPts) / 1000;
+    }
+
+    public long clipStartMs() {
+      return clipStart;
+    }
+  }
 
   @Override
   public IBinder onBind(Intent i) {
@@ -81,6 +101,10 @@ public final class ExportService extends Service {
     style = ShortStyle.load(this);
     style.outW = intent.getIntExtra("w", 1080);
     style.outH = intent.getIntExtra("h", 1920);
+    style.layers = java.util.Collections.unmodifiableList(Layer.load(this));
+    style.layersVersion = 1;
+    needsAudio = false;
+    for (Layer l : style.layers) needsAudio |= l.type == Layer.WAVE;
     cancelled = false;
     status.running = true;
     status.error = null;
@@ -93,7 +117,21 @@ public final class ExportService extends Service {
     if (Build.VERSION.SDK_INT >= 35)
       startForeground(NOTE, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING);
     else startForeground(NOTE, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
-    next();
+    if (needsAudio) {
+      update("جارٍ تجهيز الصوت للموجات…");
+      Uri src = source;
+      new Thread(() -> {
+        try {
+          long dur = Clip.Info.read(this, src).durationMs;
+          style.audio = AudioData.load(this, src, dur, new Highlights.Listener() {
+            public void progress(float f) {}
+            public boolean cancelled() { return cancelled; }
+          });
+        } catch (Exception ignored) {
+        }
+        main.post(this::next);
+      }).start();
+    } else next();
     return START_NOT_STICKY;
   }
 
@@ -109,6 +147,7 @@ public final class ExportService extends Service {
       return;
     }
     Clip c = clips.get(status.index);
+    style.clock = new ExportClock(c.startMs);
     status.percent = 0;
     update("شورت " + (status.index + 1) + " من " + status.total + " · جارٍ البدء…");
     try {

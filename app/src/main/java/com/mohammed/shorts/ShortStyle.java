@@ -37,6 +37,13 @@ final class ShortStyle {
   volatile float markX = .2f, markY = .075f;
   volatile float markOpacity = .9f;
 
+  /** Layers on top (immutable list; replaced as a whole when something changes). */
+  volatile java.util.List<Layer> layers = java.util.Collections.emptyList();
+  /** Bumped on every layer edit so the renderer knows to redraw. */
+  volatile int layersVersion = 0;
+  volatile AudioData audio;
+  volatile LayerRenderer.Clock clock;
+
   ShortStyle copy() {
     ShortStyle s = new ShortStyle();
     s.outW = outW;
@@ -57,6 +64,10 @@ final class ShortStyle {
     s.markX = markX;
     s.markY = markY;
     s.markOpacity = markOpacity;
+    s.layers = layers;
+    s.layersVersion = layersVersion;
+    s.audio = audio;
+    s.clock = clock;
     return s;
   }
 
